@@ -1,0 +1,14 @@
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+.login-wrap{min-height:100%;display:grid;place-items:center;background:linear-gradient(145deg,#0f1720 0%,#1a2836 55%,#0d1317 100%);padding:20px}
+.login-card{width:360px;max-width:100%;padding:28px 24px;border-radius:20px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(12px);color:#fff}
+.login-logo{width:56px;height:56px;border-radius:14px;background:#fff;display:grid;place-items:center;padding:8px;margin-bottom:14px}
+.login-logo img{width:100%;height:100%;object-fit:contain}
+.login-card h1{margin:0 0 4px;font-size:20px;font-weight:800}
+.login-card p{margin:0 0 18px;font-size:12px;color:rgba(255,255,255,.65);font-weight:600}
+.field-l{display:block;font-size:11px;font-weight:700;margin:10px 0 6px;color:rgba(255,255,255,.7)}
+.inp{width:100%;padding:11px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.22);background:rgba(0,0,0,.2);color:#fff;font-size:14px}
+.inp:focus{outline:2px solid #5b8def;border-color:#5b8def}
+.btn-p{width:100%;margin-top:16px;padding:12px;border:0;border-radius:10px;background:#3d6fd4;color:#fff;font-weight:800;font-size:14px;cursor:pointer}
+.btn-p:hover{background:#3562c0}
+.err{margin-top:10px;font-size:12px;font-weight:700;color:#ffb4ab}

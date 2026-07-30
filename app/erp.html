@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Vision ERP — CCTV Sales, Service & AMC</title>
+<meta name="description" content="Smart Vision Enterprise — CCTV ERP for sales, installation, service, AMC and billing.">
+<link rel="icon" href="./assets/sv-emblem.png">
+<script src="./auth-shared.js"></script>
+<script>
+  (function () {
+    const t = localStorage.getItem('sv_token');
+    if (!window.SV_AUTH || !window.SV_AUTH.isSignedIn(t)) {
+      localStorage.removeItem('sv_token');
+      localStorage.removeItem('sv_user');
+      window.location.replace('./index.html');
+    }
+  })();
+</script>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="./app.css" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #faf9f6; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  </style>
+</helmet>
+<div style="position:fixed;inset:0;">
+  <x-import component-from-global-scope="SmartVisionApp" from="./smart-vision-app.js" hint-size="100%,100%" style="position:absolute;inset:0;">
+  </x-import>
+</div>
+</x-dc>
+</body>
+</html>

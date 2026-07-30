@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Smart Vision ERP</title>
+<link rel="icon" href="./assets/sv-emblem.png">
+<link rel="stylesheet" href="./login.css">
+<script src="./auth-shared.js"></script>
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-card" id="login-form" autocomplete="on">
+      <div class="login-logo"><img src="./assets/sv-emblem.png" alt="Smart Vision"></div>
+      <h1>Smart Vision ERP</h1>
+      <p>CCTV sales, service &amp; AMC</p>
+      <label class="field-l" for="username">Username</label>
+      <input class="inp" id="username" name="username" type="text" autocomplete="username" required>
+      <label class="field-l" for="password">Password</label>
+      <input class="inp" id="password" name="password" type="password" autocomplete="current-password" required>
+      <div class="err" id="login-err" role="alert"></div>
+      <button class="btn-p" type="submit">Sign in</button>
+    </form>
+  </div>
+  <script src="./login.js"></script>
+</body>
+</html>
