@@ -5,12 +5,13 @@ const fs = require('fs');
 
 const path = require('path');
 const appJs = path.join(__dirname, 'app', 'smart-vision-app.js');
+const backupJs = path.join(__dirname, 'app', 'backup-csv.js');
 let code = fs.readFileSync(appJs, 'utf8');
 // expose internals for testing
 code += `\nglobalThis.__T = { DB, TEAM, ENTITIES, createInvoice, convertQuote, receivePO, refreshDerived,
   insightsPayload, warrantyPayload, monthCollected, cascadeCustomerRename, cascadeTeamRename,
   cascadeTeamRemove, ensureCustomer, genNum, route, api, buildTimeline, customerLinkCount, O, iso,
-  buildBackupCsvBlob, importBackupCsv, authenticateCredentials, findTeamMemberByLogin };\n`;
+  buildBackupCsvBlob, buildBackupCsvText, importBackupCsv, authenticateCredentials, findTeamMemberByLogin };\n`;
 
 // ---- browser stubs ----
 const noop = () => {};
@@ -28,7 +29,9 @@ const sandbox = {
   Blob,
 };
 sandbox.window = Object.assign(sandbox, { location: { hash: '' }, addEventListener: noop, open: (u) => sandbox.__opened = u });
+sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(backupJs, 'utf8'), sandbox, { filename: 'backup-csv.js' });
 vm.runInContext(code, sandbox, { filename: 'app.js' });
 const T = sandbox.__T;
 const { DB, TEAM } = T;
@@ -130,7 +133,7 @@ ok(mcAfter === mcBefore + 5000, 'payment recorded today counts in this month (â‚
 
 // 14. login identity (await the mock API promise properly)
 (async () => {
-const login = await T.api.post('/login', { username: 'smart', password: 'SV@7866' });
+const login = await T.api.post('/login', { username: 'smart', password: '1234' });
 ok(login.user.name === 'smart', 'login returns master user (matches Team & header)');
 
 const tech = { id: 77, name: 'Test Tech', role: 'Technician', phone: '', login_username: 'tech1', login_password: 'pass123' };
@@ -140,11 +143,40 @@ ok(teamLogin && teamLogin.user.name === 'Test Tech' && teamLogin.token === 'sv-t
 
 const blob = await T.buildBackupCsvBlob();
 const csvText = await blob.text();
-ok(csvText.includes('entity,id,json') && csvText.includes('customers'), 'CSV export contains ERP tables');
+ok(csvText.includes('## customers') && csvText.includes('## quotes') && csvText.includes('id,name,area'), 'CSV export is Excel-friendly (sectioned columns)');
 const beforeCust = DB.customers.length;
+const beforeQuotes = DB.quotes.length;
+const sampleQuote = DB.quotes[0]?.number;
 DB.customers.length = 0;
-const restored = T.importBackupCsv(csvText);
+DB.quotes.length = 0;
+const restored = await T.importBackupCsv(csvText);
 ok(DB.customers.length === beforeCust && restored.customers === beforeCust, 'CSV restore reloads customer data');
+ok(DB.quotes.length === beforeQuotes && DB.quotes.some((q) => q.number === sampleQuote && q.customer?.name), 'CSV restore reloads quotes with customer links');
+DB.customers.push({ id: 99999, name: 'Ghost Customer', area: 'X', type: 'Commercial', contact_name: '', phone: '', sites: 1, owner: T.O('Rohit Sharma'), lifetime_value: 0 });
+await T.importBackupCsv(csvText);
+ok(!DB.customers.some((c) => c.name === 'Ghost Customer'), 'CSV restore replaces data (removes rows not in backup)');
+
+// conflict: duplicate customer name in edited CSV â†’ last row wins, single record
+const conflictCsv = [
+  '# Smart Vision ERP backup v2',
+  '## team',
+  'id,name,role,phone,login_username,login_password',
+  '1,smart,Owner,,smart,1234',
+  '## customers',
+  'id,name,area,type,contact_name,phone,sites,owner,lifetime_value',
+  '1,Dup Co,Area,Commercial,A,1,1,smart,0',
+  ',Dup Co,Area2,Commercial,B,2,1,smart,100',
+  '## quotes',
+  'id,number,customer,scope,total,status,owner,valid_till,invoice_number,job_number,items',
+  ',QT-9001,Dup Co,Test scope,5000,draft,smart,2030-01-01,,,"Cam|5000"',
+].join('\r\n');
+await T.importBackupCsv(conflictCsv);
+const dups = DB.customers.filter((c) => c.name === 'Dup Co');
+ok(dups.length === 1 && dups[0].lifetime_value === 100 && Number.isFinite(dups[0].id), 'duplicate customer rows collapse (last wins, id assigned)');
+ok(DB.quotes.some((q) => q.number === 'QT-9001' && q.customer?.name === 'Dup Co' && q.items?.[0]?.amount === 5000), 'Excel line-items parse on restore');
+
+// restore full backup again so later guards still see seed customers
+await T.importBackupCsv(csvText);
 
 // 15. duplicate customer guard
 const cB = DB.customers.length;

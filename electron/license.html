@@ -18,18 +18,14 @@
   .status.bad  { background:#fdecec; border-color:#f2c8c8; color:#a12a2a; }
   label { display:block; font-size:12px; font-weight:600; color:#6d6759; margin:14px 0 6px;
           text-transform:uppercase; letter-spacing:.4px; }
-  .mid { display:flex; gap:8px; }
-  .mid input { flex:1; font-family:Consolas, monospace; font-size:16px; letter-spacing:1px;
-               text-align:center; background:#f8f6f1; }
   input, textarea { width:100%; padding:10px 12px; border:1px solid #ddd8cc; border-radius:9px;
                     font-size:13px; outline:none; }
-  textarea { font-family:Consolas, monospace; height:96px; resize:none; font-size:12px; }
+  textarea { font-family:Consolas, monospace; height:110px; resize:none; font-size:12px; }
   input:focus, textarea:focus { border-color:#b9a97e; }
   button { padding:10px 16px; border:none; border-radius:9px; font-size:13px; font-weight:600;
            cursor:pointer; }
   .primary { background:#1c1b18; color:#fff; width:100%; margin-top:16px; padding:12px; font-size:14px; }
   .primary:hover { background:#33312c; }
-  .ghost { background:#f0ede5; color:#1c1b18; white-space:nowrap; }
   .msg { min-height:20px; font-size:13px; margin-top:10px; text-align:center; }
   .msg.ok { color:#1e6b2e; } .msg.bad { color:#a12a2a; }
   .hint { font-size:12px; color:#8a857a; margin-top:14px; text-align:center; line-height:1.5; }
@@ -42,31 +38,23 @@
 
   <div class="status" id="status">Checking license…</div>
 
-  <label>Your Machine ID</label>
-  <div class="mid">
-    <input id="mid" readonly value="…">
-    <button class="ghost" id="copy">Copy</button>
-  </div>
-
-  <label>License Key</label>
-  <textarea id="key" placeholder="Paste your license key here (starts with SVE1.)"></textarea>
+  <label>License Serial</label>
+  <textarea id="key" placeholder="Paste your serial here (starts with SVE1.)"></textarea>
 
   <button class="primary" id="activate">Activate</button>
   <div class="msg" id="msg"></div>
 
-  <p class="hint">Send your <b>Machine ID</b> to Smart Vision Enterprise to receive
-  an activation key for this computer.</p>
+  <p class="hint">Paste the serial from Smart Vision Enterprise and click Activate.<br>
+  One serial works on any computer.</p>
 </div>
 <script>
   const $ = (id) => document.getElementById(id);
   async function refresh() {
     const st = await window.svLicense.info();
-    $('mid').value = st.machineCode;
     const el = $('status');
     el.textContent = st.message;
     el.className = 'status ' + (st.mode === 'licensed' ? 'ok' : st.mode === 'trial' ? 'warn' : 'bad');
   }
-  $('copy').onclick = async () => { await window.svLicense.copyMachineId(); $('copy').textContent = 'Copied!'; setTimeout(() => $('copy').textContent = 'Copy', 1200); };
   $('activate').onclick = async () => {
     const m = $('msg'); m.textContent = 'Checking…'; m.className = 'msg';
     const r = await window.svLicense.activate($('key').value);

@@ -25,7 +25,7 @@ function useNavigate() {
 }
 
 /* ---------------- auth (persistent until sign out) ---------------- */
-const MASTER_LOGIN = { username: 'smart', password: 'SV@7866' };
+const MASTER_LOGIN = { username: 'smart', password: '1234' };
 const SESSION_TOKEN = 'sv-master-session';
 function getToken() { return localStorage.getItem('sv_token'); }
 function setToken(t) { t ? localStorage.setItem('sv_token', t) : localStorage.removeItem('sv_token'); }
@@ -367,7 +367,7 @@ const api = {
     if (path === '/backup/import') {
       const file = fd.get('file');
       const text = await file.text();
-      const restored = importBackupCsv(text);
+      const restored = await importBackupCsv(text);
       return { restored };
     }
     throw new Error('not found');
@@ -448,7 +448,7 @@ function Pill({ t, dot, children }) {
 /* ====================  CREATE / EDIT machinery  ====================== */
 /* ====================================================================== */
 const TEAM = [
-  { id: 1, name: 'smart', role: 'Owner', phone: '94261 77057', login_username: 'smart', login_password: 'SV@7866' },
+  { id: 1, name: 'smart', role: 'Owner', phone: '94261 77057', login_username: 'smart', login_password: '1234' },
   { id: 2, name: 'Akram Suli', role: 'Technician', phone: '98220 41187' },
 ];
 function ensureTeamLoginDefaults() {
@@ -461,6 +461,57 @@ function ensureTeamLoginDefaults() {
 }
 const teamNames = () => TEAM.map((t) => t.name);
 
+/* ---------------- company + quote catalog (persisted with ERP state) ---------------- */
+const COMPANY_DEFAULT = {
+  name: 'Smart Vision Enterprise',
+  phone: '94261 77057',
+  email: 'smartvisionenterprise20@gmail.com',
+  web: 'www.smartvision.ink',
+  address: 'G-9, City Point, Bus Station Road, Borsad - 388540',
+  gstin: '24ABCDE1234F1Z5',
+  logo: './assets/sv-logo.png',
+  extras: 'Extra: CCTV cabling (incl. PVC pipe & laying) ₹65/Mtr · Camera fitting ₹250/No.',
+  quoteTerms: 'Prices are inclusive of GST. 50% advance along with the order, balance on completion. Warranty as per brand standard. This quotation is valid for 15 days from the date above.',
+  invoiceTerms: 'Thank you for your business. Please make payment by the due date via UPI / NEFT / cheque in favour of Smart Vision Enterprise.',
+};
+const COMPANY = (() => {
+  try { return { ...COMPANY_DEFAULT, ...(JSON.parse(localStorage.getItem('sv_company') || '{}')) }; }
+  catch { return { ...COMPANY_DEFAULT }; }
+})();
+function saveCompany(patch) {
+  Object.assign(COMPANY, patch);
+  localStorage.setItem('sv_company', JSON.stringify(COMPANY));
+  lastSaved = ''; // force next persist tick to include company
+}
+const HD_ITEMS = ['4 CH DVR', '2 MP HD Camera — 4 Nos', '1 TB HDD', 'Power Supply', 'Connector', 'Including 50 Mtr. Cable'];
+const IP_ITEMS = ['4 CH NVR', '2 MP IP Camera — 4 Nos', '1 TB HDD', '4 Port POE', 'Connector', 'Including 50 Mtr. Cable'];
+const PACKAGES = [
+  { group: 'HD Camera Solution', brand: 'Dahua', price: 13250, items: HD_ITEMS },
+  { group: 'HD Camera Solution', brand: 'Hikvision', price: 14200, items: HD_ITEMS },
+  { group: 'HD Camera Solution', brand: 'Prama', price: 12499, items: HD_ITEMS },
+  { group: 'IP Camera Solution', brand: 'Dahua', price: 25700, items: IP_ITEMS },
+  { group: 'IP Camera Solution', brand: 'Hikvision', price: 27690, items: IP_ITEMS },
+  { group: 'IP Camera Solution', brand: 'Prama', price: 24500, items: IP_ITEMS },
+];
+const EXTRAS_FALLBACK = 'Extra: CCTV cabling (incl. PVC pipe & laying) ₹65/Mtr · Camera fitting ₹250/No.';
+const AMC_PACKAGES = [
+  { group: 'AMC Plan', brand: 'Basic', price: 6000, items: ['2 preventive visits / year', 'Phone & remote support', 'Labour on call-out (parts extra)', 'Up to 8 cameras'] },
+  { group: 'AMC Plan', brand: 'Silver', price: 12000, items: ['4 preventive visits / year', 'Priority support', 'Free labour on visits', 'Up to 16 cameras + 1 NVR'] },
+  { group: 'AMC Plan', brand: 'Gold', price: 22000, items: ['6 visits / year + emergency', '24h SLA support', 'Free labour + 10% parts discount', 'Up to 32 cameras + 2 NVR'] },
+];
+const CATALOG_DEFAULT = [...PACKAGES, ...AMC_PACKAGES].map((p, i) => ({ id: i + 1, ...p, items: [...p.items] }));
+const CATALOG = (() => {
+  try {
+    const s = JSON.parse(localStorage.getItem('sv_catalog') || 'null');
+    return Array.isArray(s) && s.length ? s : CATALOG_DEFAULT.map((p) => ({ ...p, items: [...p.items] }));
+  } catch { return CATALOG_DEFAULT.map((p) => ({ ...p, items: [...p.items] })); }
+})();
+const CATALOG_GROUPS = ['HD Camera Solution', 'IP Camera Solution', 'AMC Plan'];
+function saveCatalog() {
+  localStorage.setItem('sv_catalog', JSON.stringify(CATALOG));
+  lastSaved = '';
+}
+
 /* ---------------- data persistence (server-shared, with local fallback) ----------------
    - If an ./api.php (or Python dev server) backend is reachable, ALL data is
      stored server-side in data.json, so every device/browser shares it.
@@ -469,30 +520,88 @@ const teamNames = () => TEAM.map((t) => t.name);
 const API_URL = './api.php';
 const PERSIST_KEY = 'sv_state_v1';
 let serverOK = false;
+function stateRecordCount(s) {
+  if (!s || typeof s !== 'object') return 0;
+  let n = 0;
+  if (s.DB && typeof s.DB === 'object') {
+    Object.values(s.DB).forEach((rows) => { if (Array.isArray(rows)) n += rows.length; });
+  }
+  if (Array.isArray(s.TEAM)) n += s.TEAM.length;
+  if (Array.isArray(s.CATALOG)) n += s.CATALOG.length;
+  return n;
+}
+function applyCatalog(rows) {
+  if (!Array.isArray(rows)) return;
+  CATALOG.length = 0;
+  rows.forEach((x) => CATALOG.push(x));
+}
+function applyCompany(c) {
+  if (!c || typeof c !== 'object') return;
+  Object.assign(COMPANY, COMPANY_DEFAULT, c);
+}
 function applyState(s) {
   if (!s) return;
-  if (s.DB) Object.keys(s.DB).forEach((k) => { if (Array.isArray(DB[k])) { DB[k].length = 0; s.DB[k].forEach((x) => DB[k].push(x)); } });
+  if (s.DB) {
+    Object.keys(DB).forEach((k) => { if (Array.isArray(DB[k])) DB[k].length = 0; });
+    Object.entries(s.DB).forEach(([k, rows]) => {
+      if (Array.isArray(DB[k]) && Array.isArray(rows)) rows.forEach((x) => DB[k].push(x));
+    });
+  }
   if (Array.isArray(s.TEAM)) { TEAM.length = 0; s.TEAM.forEach((x) => TEAM.push(x)); }
+  if (Array.isArray(s.CATALOG)) applyCatalog(s.CATALOG);
+  if (s.COMPANY) applyCompany(s.COMPANY);
   ensureTeamLoginDefaults();
 }
+function snapshotState() {
+  return { DB, TEAM, CATALOG, COMPANY: { ...COMPANY }, savedAt: Date.now() };
+}
 (function boot() {
+  let serverState = null;
   try {
     const xhr = new XMLHttpRequest();
     xhr.open('GET', API_URL + '?t=' + Date.now(), false); // sync so DB is ready before first render
     xhr.send(null);
     if (xhr.status >= 200 && xhr.status < 300) {
       serverOK = true;
-      const j = JSON.parse(xhr.responseText || 'null');
-      if (j && (j.DB || j.TEAM)) applyState(j);
-      return; // server is the source of truth
+      try { serverState = JSON.parse(xhr.responseText || 'null'); } catch (e) { serverState = null; }
     }
   } catch (e) { /* no backend reachable */ }
-  try { applyState(JSON.parse(localStorage.getItem(PERSIST_KEY) || 'null')); } catch (e) { /* ignore */ }
+  let localState = null;
+  try { localState = JSON.parse(localStorage.getItem(PERSIST_KEY) || 'null'); } catch (e) { /* ignore */ }
+
+  const sc = stateRecordCount(serverState);
+  const lc = stateRecordCount(localState);
+  const sAt = Number(serverState && serverState.savedAt) || 0;
+  const lAt = Number(localState && localState.savedAt) || 0;
+  const healServer = (state) => {
+    if (!serverOK) return;
+    try {
+      const payload = JSON.stringify({ ...state, savedAt: Date.now() });
+      fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true });
+    } catch (e) { /* ignore */ }
+  };
+
+  // Prefer whichever snapshot actually has data. Empty server `{}` must NOT keep seed
+  // demo in memory — that used to overwrite real saves on the next persist tick.
+  if (sc > 0 && lc > 0) {
+    if (lAt > sAt || (lAt === sAt && lc > sc)) {
+      applyState(localState);
+      if (lAt > sAt || lc > sc) healServer(localState);
+    } else {
+      applyState(serverState);
+    }
+  } else if (sc > 0) {
+    applyState(serverState);
+  } else if (lc > 0) {
+    applyState(localState);
+    healServer(localState);
+  }
+  // else: first run — keep in-file seed demo until the user edits / restores
   ensureTeamLoginDefaults();
 })();
 let lastSaved = '';
 function persistState() {
-  let payload; try { payload = JSON.stringify({ DB, TEAM }); } catch (e) { return; }
+  let payload; try { payload = JSON.stringify(snapshotState()); } catch (e) { return; }
   if (payload === lastSaved) return;
   lastSaved = payload;
   try { localStorage.setItem(PERSIST_KEY, payload); } catch (e) { /* ignore */ }
@@ -504,94 +613,56 @@ if (typeof window !== 'undefined') {
   document.addEventListener('visibilitychange', () => { if (document.hidden) persistState(); });
 }
 
-/* ---------------- CSV backup / restore (all ERP tables) ---------------- */
-const BACKUP_CSV_MARKER = '# Smart Vision ERP backup v1';
-function csvCell(value) {
-  const s = String(value ?? '');
-  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-  return s;
-}
-function parseCsvRow(line) {
-  const out = [];
-  let cur = '';
-  let i = 0;
-  let quoted = false;
-  while (i < line.length) {
-    const ch = line[i];
-    if (quoted) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') { cur += '"'; i += 2; continue; }
-        quoted = false; i++; continue;
-      }
-      cur += ch; i++; continue;
-    }
-    if (ch === '"') { quoted = true; i++; continue; }
-    if (ch === ',') { out.push(cur); cur = ''; i++; continue; }
-    cur += ch; i++;
-  }
-  out.push(cur);
-  return out;
+/* ---------------- CSV backup / restore (Excel-friendly v2 + legacy v1) ---------------- */
+const SvCsv = (typeof globalThis !== 'undefined' && globalThis.SvBackupCsv)
+  || (typeof require === 'function' ? (() => { try { return require('./backup-csv'); } catch (e) { return null; } })() : null);
+if (!SvCsv) throw new Error('backup-csv.js not loaded — include app/backup-csv.js before the app');
+const BACKUP_CSV_MARKER = SvCsv.MARKER_V2 || SvCsv.MARKER;
+function buildBackupCsvText() {
+  return SvCsv.stateToCsv({ DB, TEAM });
 }
 function buildBackupCsvBlob() {
-  const lines = ['entity,id,json'];
-  Object.keys(DB).forEach((table) => {
-    const rows = DB[table];
-    if (!Array.isArray(rows)) return;
-    rows.forEach((row) => {
-      lines.push([csvCell(table), csvCell(row.id ?? ''), csvCell(JSON.stringify(row))].join(','));
-    });
-  });
-  TEAM.forEach((row) => {
-    lines.push([csvCell('team'), csvCell(row.id ?? ''), csvCell(JSON.stringify(row))].join(','));
-  });
-  const body = '\uFEFF' + BACKUP_CSV_MARKER + '\r\n' + lines.join('\r\n');
-  return new Blob([body], { type: 'text/csv;charset=utf-8' });
+  return new Blob([buildBackupCsvText()], { type: 'text/csv;charset=utf-8' });
 }
-function importBackupCsv(text) {
-  const raw = String(text || '').replace(/^\uFEFF/, '');
-  const lines = raw.split(/\r?\n/).filter((l) => l && !l.startsWith('#'));
-  if (!lines.length) throw new Error('empty backup');
-  const head = lines[0].toLowerCase();
-  if (!head.startsWith('entity,')) throw new Error('invalid backup header');
-  const newDB = {};
-  const newTeam = [];
-  const counts = {};
-  for (let i = 1; i < lines.length; i++) {
-    const cols = parseCsvRow(lines[i]);
-    if (cols.length < 3) continue;
-    const entity = cols[0];
-    let rec;
-    try { rec = JSON.parse(cols[2]); } catch (e) { continue; }
-    if (entity === 'team') {
-      newTeam.push(rec);
-      counts.team = (counts.team || 0) + 1;
-    } else {
-      if (!newDB[entity]) newDB[entity] = [];
-      newDB[entity].push(rec);
-      counts[entity] = (counts[entity] || 0) + 1;
-    }
-  }
-  if (!Object.keys(counts).length) throw new Error('no records in backup');
-  applyState({ DB: newDB, TEAM: newTeam.length ? newTeam : TEAM.slice() });
+function parseBackupCsv(text) {
+  const { state, counts } = SvCsv.csvToState(text);
+  return {
+    newDB: state.DB || {},
+    newTeam: state.TEAM || [],
+    newCatalog: state.CATALOG,
+    newCompany: state.COMPANY,
+    counts,
+  };
+}
+async function importBackupCsv(text) {
+  const { newDB, newTeam, newCatalog, newCompany, counts } = parseBackupCsv(text);
+  applyState({ DB: newDB, TEAM: newTeam, CATALOG: newCatalog, COMPANY: newCompany });
   lastSaved = '';
-  persistState();
+  await persistStateNow();
   return counts;
 }
-async function flushToServer() {
+async function persistStateNow() {
   let payload;
-  try { payload = JSON.stringify({ DB, TEAM }); } catch (e) { return; }
-  lastSaved = '';
-  persistState();
-  if (!serverOK) return;
+  try { payload = JSON.stringify(snapshotState()); } catch (e) { return false; }
+  lastSaved = payload;
+  try { localStorage.setItem(PERSIST_KEY, payload); } catch (e) { /* ignore */ }
+  if (!serverOK) return true;
   try {
-    await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload });
-  } catch (e) { /* ignore */ }
+    const res = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload });
+    return res.ok;
+  } catch (e) { return false; }
+}
+async function flushToServer() {
+  await persistStateNow();
 }
 function countCsvRecords(csvText) {
-  return String(csvText || '').split(/\r?\n/)
-    .filter((l) => l && !l.startsWith('#') && !l.toLowerCase().startsWith('entity,')).length;
+  return SvCsv.countCsvRecords(csvText);
 }
-function downloadBackupCsv(csvText, filename) {
+async function downloadBackupCsv(csvText, filename) {
+  if (typeof window !== 'undefined' && window.electronAPI?.saveBackupCsv) {
+    const r = await window.electronAPI.saveBackupCsv(csvText, filename);
+    if (r?.ok) return r.path || null;
+  }
   const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -601,6 +672,7 @@ function downloadBackupCsv(csvText, filename) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+  return null;
 }
 const nextId = (arr) => arr.reduce((m, x) => Math.max(m, x.id || 0), 0) + 1;
 const num = (v) => Number(v) || 0;
@@ -698,11 +770,25 @@ function cascadeCustomerRename(oldName, newName) {
   DB.serials.forEach((s) => fix(s.customer));
   DB.repairs.forEach((r) => fix(r.customer));
 }
+function cascadeCustomerDelete(name) {
+  const match = (row) => row?.customer?.name === name;
+  const strip = (arr) => { for (let k = arr.length - 1; k >= 0; k--) if (match(arr[k])) arr.splice(k, 1); };
+  strip(DB.quotes);
+  strip(DB.invoices);
+  strip(DB.jobs);
+  strip(DB.tickets);
+  strip(DB.amc);
+  strip(DB.equipment);
+  strip(DB.credentials);
+  strip(DB.serials);
+  strip(DB.repairs);
+  for (let k = DB.leads.length - 1; k >= 0; k--) if (DB.leads[k].name === name) DB.leads.splice(k, 1);
+}
 const customerLinkCount = (name) =>
   DB.quotes.filter((q) => q.customer?.name === name).length + DB.invoices.filter((i) => i.customer?.name === name).length +
   DB.jobs.filter((j) => j.customer?.name === name).length + DB.tickets.filter((t) => t.customer?.name === name).length +
   DB.amc.filter((a) => a.customer?.name === name).length + DB.equipment.filter((e) => e.customer?.name === name).length +
-  DB.repairs.filter((r) => r.customer?.name === name).length;
+  DB.serials.filter((s) => s.customer?.name === name).length + DB.repairs.filter((r) => r.customer?.name === name).length;
 // Team rename/remove cascades to owner / technician / assignee links.
 function cascadeTeamRename(oldName, newName) {
   const fix = (o) => { if (o && o.name === oldName) o.name = newName; };
@@ -885,6 +971,248 @@ const ENTITIES = {
   ], create: (v) => DB.repairs.push({ id: nextId(DB.repairs), number: genNum('SR-', DB.repairs, 7000), customer: O(v.customer), device: v.device, serial_no: v.serial_no, issue: v.issue, coverage: v.coverage || 'paid', received_on: iso(0), promised_on: iso(num(v.promised_days) || 3), technician: v.technician ? O(v.technician) : null, charge: num(v.charge), status: v.status || 'received' }) },
 };
 
+const ENTITY_STORE = {
+  lead: 'leads', quote: 'quotes', invoice: 'invoices', customer: 'customers',
+  job: 'jobs', ticket: 'tickets', amc: 'amc', product: 'products',
+  serial: 'serials', credential: 'credentials', po: 'purchaseOrders',
+  equipment: 'equipment', repair: 'repairs',
+};
+function entityDelete(entity, id) {
+  const table = ENTITY_STORE[entity];
+  if (!table || !Array.isArray(DB[table])) return false;
+  const i = DB[table].findIndex((x) => x.id === id);
+  if (i < 0) return false;
+  DB[table].splice(i, 1);
+  return true;
+}
+function entityEditFields(entity) {
+  const cfg = ENTITIES[entity];
+  if (!cfg) return [];
+  if (entity === 'job') return [
+    { key: 'customer', label: 'Customer', type: 'select', options: custNames },
+    { key: 'type', label: 'Type', type: 'select', options: ['install', 'survey', 'amc', 'repair'] },
+    { key: 'scope', label: 'Scope', type: 'textarea' },
+    { key: 'scheduled_on', label: 'Scheduled on (YYYY-MM-DD)' },
+    { key: 'slot', label: 'Slot' },
+    { key: 'technician', label: 'Technician', type: 'select', options: teamNames },
+    { key: 'status', label: 'Status', type: 'select', options: ['scheduled', 'unassigned', 'in_progress', 'done', 'cancelled'] },
+  ];
+  if (entity === 'ticket') return [
+    { key: 'customer', label: 'Customer', type: 'select', options: custNames },
+    { key: 'issue', label: 'Issue', type: 'textarea' },
+    { key: 'priority', label: 'Priority', type: 'select', options: ['high', 'medium', 'low'] },
+    { key: 'coverage', label: 'Coverage', type: 'select', options: ['amc', 'warranty', 'paid'] },
+    { key: 'assignee', label: 'Assign to', type: 'select', options: teamNames },
+    { key: 'status', label: 'Status', type: 'select', options: ['open', 'in_progress', 'on_hold', 'resolved', 'closed'] },
+    { key: 'sla_state', label: 'SLA', type: 'select', options: [['ok', 'On track'], ['at_risk', 'At risk'], ['breached', 'Breached'], ['met', 'Met']] },
+  ];
+  if (entity === 'amc') return [
+    { key: 'customer', label: 'Customer', type: 'select', options: custNames },
+    { key: 'plan', label: 'Plan', type: 'select', options: ['basic', 'silver', 'gold'] },
+    { key: 'devices', label: 'Devices', type: 'number' },
+    { key: 'value', label: 'Annual value (₹)', type: 'number' },
+    { key: 'visits_total', label: 'Visits / year', type: 'number' },
+    { key: 'visits_used', label: 'Visits used', type: 'number' },
+    { key: 'starts_on', label: 'Starts on (YYYY-MM-DD)' },
+    { key: 'ends_on', label: 'Ends on (YYYY-MM-DD)' },
+    { key: 'status', label: 'Status', type: 'select', options: ['active', 'expiring', 'expired'] },
+  ];
+  if (entity === 'equipment') return [
+    { key: 'name', label: 'Device name' },
+    { key: 'customer', label: 'Customer', type: 'select', options: custNames },
+    { key: 'location', label: 'Location' },
+    { key: 'serial_no', label: 'Serial number' },
+    { key: 'installed_on', label: 'Installed on (YYYY-MM-DD)' },
+    { key: 'warranty_end', label: 'Warranty end (YYYY-MM-DD)' },
+  ];
+  if (entity === 'repair') return [
+    { key: 'customer', label: 'Customer', type: 'select', options: custNames },
+    { key: 'device', label: 'Device' }, { key: 'serial_no', label: 'Serial number' },
+    { key: 'issue', label: 'Reported problem', type: 'textarea' },
+    { key: 'coverage', label: 'Coverage', type: 'select', options: ['amc', 'warranty', 'paid'] },
+    { key: 'technician', label: 'Technician', type: 'select', options: teamNames },
+    { key: 'promised_on', label: 'Promised on (YYYY-MM-DD)' },
+    { key: 'charge', label: 'Charge (₹)', type: 'number' },
+    { key: 'status', label: 'Status', type: 'select', options: [['received', 'Received'], ['diagnosing', 'Diagnosing'], ['repairing', 'Repairing'], ['ready', 'Ready'], ['delivered', 'Delivered']] },
+  ];
+  if (entity === 'po') return [
+    { key: 'supplier', label: 'Supplier' },
+    { key: 'eta', label: 'ETA (YYYY-MM-DD)' },
+    { key: 'total', label: 'Value (₹)', type: 'number' },
+    { key: 'status', label: 'Status', type: 'select', options: ['draft', 'ordered', 'partial', 'received', 'cancelled'] },
+  ];
+  if (entity === 'invoice') return [
+    { key: 'customer', label: 'Customer', type: 'select', options: custNames },
+    { key: 'total', label: 'Total (₹)', type: 'number' },
+    { key: 'paid', label: 'Paid (₹)', type: 'number' },
+    { key: 'status', label: 'Status', type: 'select', options: ['sent', 'partial', 'paid', 'overdue', 'draft'] },
+    { key: 'issue_date', label: 'Issue date (YYYY-MM-DD)' },
+    { key: 'due_date', label: 'Due date (YYYY-MM-DD)' },
+    { key: 'note', label: 'Note' },
+  ];
+  if (entity === 'product') return cfg.fields;
+  if (entity === 'serial') return cfg.fields;
+  if (entity === 'credential') return cfg.fields;
+  if (entity === 'lead') return cfg.fields;
+  if (entity === 'quote') return [
+    { key: 'customer', label: 'Customer', type: 'select', options: custNames },
+    { key: 'scope', label: 'Scope', type: 'textarea' },
+    { key: 'total', label: 'Value (₹)', type: 'number' },
+    { key: 'status', label: 'Status', type: 'select', options: ['draft', 'sent', 'negotiation', 'accepted', 'expired'] },
+    { key: 'owner', label: 'Owner', type: 'select', options: teamNames },
+    { key: 'valid_till', label: 'Valid till (YYYY-MM-DD)' },
+  ];
+  return cfg.fields;
+}
+function entityToInitial(entity, r) {
+  if (!r) return {};
+  if (entity === 'job') return {
+    customer: r.customer?.name || '', type: r.type || 'install', scope: r.scope || '',
+    scheduled_on: r.scheduled_on || '', slot: r.slot || '', technician: r.technician?.name || '', status: r.status || 'scheduled',
+  };
+  if (entity === 'ticket') return {
+    customer: r.customer?.name || '', issue: r.issue || '', priority: r.priority || 'medium',
+    coverage: r.coverage || 'paid', assignee: r.assignee?.name || '', status: r.status || 'open', sla_state: r.sla_state || 'ok',
+  };
+  if (entity === 'amc') return {
+    customer: r.customer?.name || '', plan: r.plan || 'silver', devices: r.devices, value: r.value,
+    visits_total: r.visits_total, visits_used: r.visits_used, starts_on: r.starts_on || '', ends_on: r.ends_on || '', status: r.status || 'active',
+  };
+  if (entity === 'equipment') return {
+    name: r.name || '', customer: r.customer?.name || '', location: r.location || '',
+    serial_no: r.serial?.serial_no || '', installed_on: r.installed_on || '', warranty_end: r.warranty_end || '',
+  };
+  if (entity === 'credential') return {
+    label: r.label || '', customer: r.customer?.name || '', host: r.host || '', port: r.port || 8000,
+    username: r.username || '', password: r.password || '', notes: r.notes || '',
+  };
+  if (entity === 'product') return {
+    sku: r.sku || '', name: r.name || '', specs: r.specs || '', category: r.category || 'Cameras',
+    purchase_price: r.purchase_price, sale_price: r.sale_price, stock: r.stock, reserved: r.reserved,
+    reorder_level: r.reorder_level, track_serials: r.track_serials ? 'Yes' : 'No',
+  };
+  if (entity === 'serial') return {
+    serial_no: r.serial_no || '', product: r.product?.name || '', status: r.status || 'in_stock', customer: r.customer?.name || '',
+  };
+  if (entity === 'po') return {
+    supplier: r.supplier?.name || '', eta: r.eta || '', total: r.total, status: r.status || 'ordered',
+  };
+  if (entity === 'repair') return {
+    customer: r.customer?.name || '', device: r.device || '', serial_no: r.serial_no || '', issue: r.issue || '',
+    coverage: r.coverage || 'paid', technician: r.technician?.name || '', promised_on: r.promised_on || '',
+    charge: r.charge, status: r.status || 'received',
+  };
+  if (entity === 'lead') return {
+    name: r.name || '', requirement: r.requirement || '', value: r.value, source: r.source || '',
+    segment: r.segment || '', owner: r.owner?.name || '', stage: String(r.stage ?? 0),
+  };
+  if (entity === 'quote') return {
+    customer: r.customer?.name || '', scope: r.scope || '', total: r.total, status: r.status || 'draft',
+    owner: r.owner?.name || '', valid_till: r.valid_till || '',
+  };
+  if (entity === 'invoice') return {
+    customer: r.customer?.name || '', total: r.total, paid: r.paid, status: r.status || 'sent',
+    issue_date: r.issue_date || '', due_date: r.due_date || '', note: r.note || '',
+  };
+  return {};
+}
+function entityApplyEdit(entity, row, v) {
+  if (!row) return;
+  if (entity === 'job') {
+    Object.assign(row, {
+      customer: O(v.customer), type: v.type || row.type, scope: v.scope, scheduled_on: v.scheduled_on || row.scheduled_on,
+      slot: v.slot || 'TBD', technician: v.technician ? O(v.technician) : null, status: v.status || row.status,
+    });
+    return;
+  }
+  if (entity === 'ticket') {
+    Object.assign(row, {
+      customer: O(v.customer), issue: v.issue, priority: v.priority || row.priority, coverage: v.coverage || row.coverage,
+      assignee: v.assignee ? O(v.assignee) : null, status: v.status || row.status, sla_state: v.sla_state || row.sla_state,
+    });
+    return;
+  }
+  if (entity === 'amc') {
+    Object.assign(row, {
+      customer: O(v.customer), plan: v.plan || row.plan, devices: num(v.devices), value: num(v.value),
+      visits_total: num(v.visits_total) || row.visits_total, visits_used: num(v.visits_used),
+      starts_on: v.starts_on || row.starts_on, ends_on: v.ends_on || row.ends_on, status: v.status || row.status,
+    });
+    return;
+  }
+  if (entity === 'equipment') {
+    Object.assign(row, {
+      name: v.name, customer: O(v.customer), product: O(v.name), location: v.location,
+      serial: { serial_no: v.serial_no || '—' }, installed_on: v.installed_on || row.installed_on,
+      warranty_end: v.warranty_end || row.warranty_end,
+      in_warranty: v.warranty_end ? new Date(v.warranty_end).getTime() > Date.now() : row.in_warranty,
+    });
+    return;
+  }
+  if (entity === 'credential') {
+    Object.assign(row, {
+      label: v.label, customer: O(v.customer), host: v.host, port: num(v.port) || 8000,
+      username: v.username, password: v.password, notes: v.notes || '—',
+    });
+    return;
+  }
+  if (entity === 'product') {
+    Object.assign(row, {
+      sku: v.sku, name: v.name, specs: v.specs, category: v.category || row.category,
+      purchase_price: num(v.purchase_price), sale_price: num(v.sale_price), stock: num(v.stock),
+      reserved: num(v.reserved), reorder_level: num(v.reorder_level), track_serials: v.track_serials === 'Yes',
+    });
+    return;
+  }
+  if (entity === 'serial') {
+    Object.assign(row, {
+      serial_no: v.serial_no, product: O(v.product), status: v.status || row.status,
+      customer: v.customer ? O(v.customer) : null,
+      in_warranty: v.status === 'installed' ? true : !!row.in_warranty,
+    });
+    return;
+  }
+  if (entity === 'po') {
+    const prev = row.status;
+    Object.assign(row, {
+      supplier: O(v.supplier), eta: v.eta || row.eta, total: num(v.total), status: v.status || row.status,
+    });
+    if (prev !== 'received' && row.status === 'received') receivePO(row);
+    return;
+  }
+  if (entity === 'repair') {
+    Object.assign(row, {
+      customer: O(v.customer), device: v.device, serial_no: v.serial_no, issue: v.issue,
+      coverage: v.coverage || row.coverage, technician: v.technician ? O(v.technician) : null,
+      promised_on: v.promised_on || row.promised_on, charge: num(v.charge), status: v.status || row.status,
+    });
+    return;
+  }
+  if (entity === 'lead') {
+    Object.assign(row, {
+      name: v.name, requirement: v.requirement, value: num(v.value), source: v.source || row.source,
+      segment: v.segment || row.segment, owner: O(v.owner || teamNames()[0]), stage: num(v.stage),
+    });
+    return;
+  }
+  if (entity === 'quote') {
+    Object.assign(row, {
+      customer: O(v.customer), scope: v.scope, total: num(v.total), status: v.status || row.status,
+      owner: O(v.owner || teamNames()[0]), valid_till: v.valid_till || row.valid_till,
+    });
+    convertQuote(row);
+    return;
+  }
+  if (entity === 'invoice') {
+    Object.assign(row, {
+      customer: O(v.customer), total: num(v.total), paid: num(v.paid), status: v.status || row.status,
+      issue_date: v.issue_date || row.issue_date, due_date: v.due_date || row.due_date, note: v.note || '',
+    });
+    row.balance = row.total - row.paid;
+    return;
+  }
+}
+
 function FormModal({ title, fields, submitLabel = 'Save', initial, onClose, onSave }) {
   const [form, setForm] = useState(() => {
     const o = { ...(initial || {}) };
@@ -1040,7 +1368,13 @@ function Shell({ active, children }) {
             <div className="rl">{user.role || ''}</div>
           </div>
           <button className="dwclose" title="Sign out" style={{ marginLeft: 'auto' }}
-            onClick={() => { setToken(null); localStorage.removeItem('sv_user'); window.location.replace('./index.html'); }}>
+            onClick={() => {
+              if (!confirm('Sign out of Smart Vision ERP?')) return;
+              setToken(null);
+              localStorage.removeItem('sv_user');
+              // nologin=1 skips one auto-login so the password field stays usable
+              window.location.replace('./index.html?nologin=1');
+            }}>
             <Ic n="chevR" s={15}/>
           </button>
         </div>
@@ -1117,13 +1451,34 @@ function StatRow({ children }) { return <div className="stc-row">{children}</div
 function TablePage({ active, title, sub, endpoint, columns, rowToRecord, stats, chips, actions, primaryAction, entity, recFoot }) {
   const [filter, setFilter] = useState(chips?.[0]?.value ?? null);
   const [rec, setRec] = useState(null);
+  const [editRow, setEditRow] = useState(null);
   const path = endpoint + (filter ? (endpoint.includes('?') ? '&' : '?') + 'filter=' + filter : '');
   const { data, loading, reload } = useFetch(path, [path]);
   const rows = Array.isArray(data) ? data : (data?.data ?? []);
-  const openRow = (r) => { // v5: recFoot lets pages add wired action buttons to the drawer
+  const cfg = entity ? ENTITIES[entity] : null;
+  const canMutate = !!(entity && ENTITY_STORE[entity]);
+
+  const doDelete = (r) => {
+    if (!canMutate) return;
+    if (!confirm(`Delete this ${cfg?.label || 'record'}? This cannot be undone.`)) return;
+    if (entityDelete(entity, r.id)) { setRec(null); reload(); }
+  };
+  const doSaveEdit = (v) => {
+    if (!editRow || !canMutate) return;
+    const row = DB[ENTITY_STORE[entity]]?.find((x) => x.id === editRow.id);
+    if (row) entityApplyEdit(entity, row, v);
+    setEditRow(null); setRec(null); reload();
+  };
+
+  const openRow = (r) => {
     if (!rowToRecord) return;
     const base = rowToRecord(r);
-    if (recFoot) base.foot = recFoot(r, () => { reload(); setRec(null); });
+    const extra = recFoot ? recFoot(r, () => { reload(); setRec(null); }) : null;
+    base.foot = <>
+      {canMutate && <button className="btn-o" onClick={() => setEditRow(r)}><Ic n="sliders" s={14}/>Edit</button>}
+      {canMutate && <button className="btn-o" style={{ color: 'var(--red)' }} onClick={() => doDelete(r)}>Delete</button>}
+      {extra}
+    </>;
     setRec(base);
   };
   return (
@@ -1159,6 +1514,9 @@ function TablePage({ active, title, sub, endpoint, columns, rowToRecord, stats, 
           )}
       </div>
       <Drawer rec={rec} onClose={() => setRec(null)}/>
+      {editRow && <FormModal title={'Edit ' + (cfg?.label || 'record')} submitLabel="Save Changes"
+        fields={entityEditFields(entity)} initial={entityToInitial(entity, editRow)}
+        onClose={() => setEditRow(null)} onSave={doSaveEdit}/>}
     </Shell>
   );
 }
@@ -1166,49 +1524,6 @@ function TablePage({ active, title, sub, endpoint, columns, rowToRecord, stats, 
 /* ====================================================================== */
 /* ====================  PAGES  ========================================= */
 /* ====================================================================== */
-/* ====================================================================== */
-/* ====================  COMPANY + PACKAGES (from flyer)  =============== */
-/* ====================================================================== */
-const COMPANY_DEFAULT = {
-  name: 'Smart Vision Enterprise',
-  phone: '94261 77057',
-  email: 'smartvisionenterprise20@gmail.com',
-  web: 'www.smartvision.ink',
-  address: 'G-9, City Point, Bus Station Road, Borsad - 388540',
-  gstin: '24ABCDE1234F1Z5',
-  logo: './assets/sv-logo.png',
-  extras: 'Extra: CCTV cabling (incl. PVC pipe & laying) ₹65/Mtr · Camera fitting ₹250/No.',
-  quoteTerms: 'Prices are inclusive of GST. 50% advance along with the order, balance on completion. Warranty as per brand standard. This quotation is valid for 15 days from the date above.',
-  invoiceTerms: 'Thank you for your business. Please make payment by the due date via UPI / NEFT / cheque in favour of Smart Vision Enterprise.',
-};
-const COMPANY = (() => {
-  try { return { ...COMPANY_DEFAULT, ...(JSON.parse(localStorage.getItem('sv_company') || '{}')) }; }
-  catch { return { ...COMPANY_DEFAULT }; }
-})();
-function saveCompany(patch) { Object.assign(COMPANY, patch); localStorage.setItem('sv_company', JSON.stringify(COMPANY)); }
-const HD_ITEMS = ['4 CH DVR', '2 MP HD Camera — 4 Nos', '1 TB HDD', 'Power Supply', 'Connector', 'Including 50 Mtr. Cable'];
-const IP_ITEMS = ['4 CH NVR', '2 MP IP Camera — 4 Nos', '1 TB HDD', '4 Port POE', 'Connector', 'Including 50 Mtr. Cable'];
-const PACKAGES = [
-  { group: 'HD Camera Solution', brand: 'Dahua', price: 13250, items: HD_ITEMS },
-  { group: 'HD Camera Solution', brand: 'Hikvision', price: 14200, items: HD_ITEMS },
-  { group: 'HD Camera Solution', brand: 'Prama', price: 12499, items: HD_ITEMS },
-  { group: 'IP Camera Solution', brand: 'Dahua', price: 25700, items: IP_ITEMS },
-  { group: 'IP Camera Solution', brand: 'Hikvision', price: 27690, items: IP_ITEMS },
-  { group: 'IP Camera Solution', brand: 'Prama', price: 24500, items: IP_ITEMS },
-];
-const EXTRAS_FALLBACK = 'Extra: CCTV cabling (incl. PVC pipe & laying) ₹65/Mtr · Camera fitting ₹250/No.';
-const AMC_PACKAGES = [
-  { group: 'AMC Plan', brand: 'Basic', price: 6000, items: ['2 preventive visits / year', 'Phone & remote support', 'Labour on call-out (parts extra)', 'Up to 8 cameras'] },
-  { group: 'AMC Plan', brand: 'Silver', price: 12000, items: ['4 preventive visits / year', 'Priority support', 'Free labour on visits', 'Up to 16 cameras + 1 NVR'] },
-  { group: 'AMC Plan', brand: 'Gold', price: 22000, items: ['6 visits / year + emergency', '24h SLA support', 'Free labour + 10% parts discount', 'Up to 32 cameras + 2 NVR'] },
-];
-const CATALOG_DEFAULT = [...PACKAGES, ...AMC_PACKAGES].map((p, i) => ({ id: i + 1, ...p, items: [...p.items] }));
-const CATALOG = (() => {
-  try { const s = JSON.parse(localStorage.getItem('sv_catalog') || 'null'); return Array.isArray(s) && s.length ? s : CATALOG_DEFAULT.map((p) => ({ ...p, items: [...p.items] })); }
-  catch { return CATALOG_DEFAULT.map((p) => ({ ...p, items: [...p.items] })); }
-})();
-const CATALOG_GROUPS = ['HD Camera Solution', 'IP Camera Solution', 'AMC Plan'];
-function saveCatalog() { localStorage.setItem('sv_catalog', JSON.stringify(CATALOG)); }
 const findCust = (name) => DB.customers.find((c) => c.name === name) || {};
 const waNumber = (phone) => { const d = String(phone || '').replace(/\D/g, ''); return d ? ('91' + d.replace(/^91/, '')) : ''; };
 
@@ -1618,6 +1933,7 @@ function Quotes() {
     </>,
     foot: <>
       <button className="btn-o" onClick={() => setBuilder({ title: 'Edit ' + r.number, editing: r.id, initial: { customer: r.customer?.name, scope: r.scope, items: r.items, status: r.status, owner: r.owner?.name } })}><Ic n="sliders" s={14}/>Edit</button>
+      <button className="btn-o" style={{ color: 'var(--red)' }} onClick={() => { if (confirm(`Delete quotation ${r.number}?`)) { entityDelete('quote', r.id); setRec(null); reload(); } }}>Delete</button>
       <button className="btn-o wa-btn" onClick={() => waQuote(r)}><Ic n="whatsapp" s={14}/>Send</button>
       <button className="btn-o" onClick={() => setPrintDoc(r)}><Ic n="printer" s={14}/>Print A4</button>
     </>,
@@ -1645,10 +1961,10 @@ function Quotes() {
                   <span style={{ fontWeight: 800, fontSize: 16, color: 'var(--a-ink)' }}>{inr(p.price)}{g === 'AMC Plan' ? <span style={{ fontSize: 11, color: 'var(--mut)' }}>/yr</span> : ''}</span>
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--ink2)', fontWeight: 600, lineHeight: 1.5 }}>{p.items.join(' · ')}</div>
-                <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
-                  <button className="btn-o" style={{ flex: 1, justifyContent: 'center' }} onClick={() => setBuilder({ title: 'Quote · ' + p.brand + ' ' + p.group, initial: { scope: p.brand + ' ' + p.group, items: [{ description: p.brand + ' ' + p.group + (g === 'AMC Plan' ? ' — annual contract' : ' — complete package'), amount: p.price }].concat(p.items.map((d) => ({ description: d, amount: 0 }))) } })}><Ic n="plus" s={13} sw={2.2}/>Quote this</button>
-                  <button className="act" title="Edit plan" onClick={() => setPlanEdit({ id: p.id, group: p.group, brand: p.brand, price: p.price, items: [...p.items] })}><Ic n="sliders" s={14}/></button>
-                  <button className="act" title="Delete plan" style={{ color: 'var(--red)', fontSize: 17, lineHeight: 1 }} onClick={() => { if (confirm(`Delete the ${p.brand} ${p.group} plan?`)) { const i = CATALOG.findIndex((x) => x.id === p.id); if (i >= 0) CATALOG.splice(i, 1); saveCatalog(); force((n) => n + 1); } }}>×</button>
+                <div style={{ display: 'flex', gap: 6, marginTop: 2, flexWrap: 'wrap' }}>
+                  <button type="button" className="btn-o" style={{ flex: 1, justifyContent: 'center' }} onClick={(e) => { e.stopPropagation(); setBuilder({ title: 'Quote · ' + p.brand + ' ' + p.group, initial: { scope: p.brand + ' ' + p.group, items: [{ description: p.brand + ' ' + p.group + (g === 'AMC Plan' ? ' — annual contract' : ' — complete package'), amount: p.price }].concat(p.items.map((d) => ({ description: d, amount: 0 }))) } }); }}><Ic n="plus" s={13} sw={2.2}/>Quote this</button>
+                  <button type="button" className="btn-o" onClick={(e) => { e.stopPropagation(); setPlanEdit({ id: p.id, group: p.group, brand: p.brand, price: p.price, items: [...p.items] }); }}><Ic n="sliders" s={14}/>Edit</button>
+                  <button type="button" className="btn-o" style={{ color: 'var(--red)' }} onClick={(e) => { e.stopPropagation(); if (confirm(`Delete the ${p.brand} ${p.group} plan?`)) { const i = CATALOG.findIndex((x) => x.id === p.id); if (i >= 0) CATALOG.splice(i, 1); saveCatalog(); force((n) => n + 1); } }}>Delete</button>
                 </div>
               </div>
             ))}
@@ -1696,6 +2012,7 @@ function Invoices() {
   const rows = data?.data ?? [];
   const [payFor, setPayFor] = useState(null);
   const [printDoc, setPrintDoc] = useState(null);
+  const [editRow, setEditRow] = useState(null);
   const whatsapp = (r) => {
     const message = `Hello ${r.customer?.name || ''},\n\nGentle reminder for invoice ${r.number}.\nTotal: ${inr(r.total)} · Received: ${inr(r.paid)} · Balance due: ${inr(r.balance)} (due ${date(r.due_date)}).\n\nRegards,\n${COMPANY.name}\n${COMPANY.phone}`;
     waOpen(r.customer?.name, message, { kind: 'invoice', doc: r });
@@ -1717,6 +2034,8 @@ function Invoices() {
       ['Total', inr(r.total)], ['Received', inr(r.paid)], ['Balance', inr(r.balance)],
     ]}/></DwSection>,
     foot: <>
+      <button className="btn-o" onClick={() => setEditRow(r)}><Ic n="sliders" s={14}/>Edit</button>
+      <button className="btn-o" style={{ color: 'var(--red)' }} onClick={() => { if (confirm(`Delete invoice ${r.number}?`)) { entityDelete('invoice', r.id); setRec(null); reload(); reloadStats(); } }}>Delete</button>
       <button className="btn-o" onClick={() => setPrintDoc(r)}><Ic n="printer" s={14}/>Print</button>
       <button className="btn-o wa-btn" onClick={() => whatsapp(r)}><Ic n="whatsapp" s={14}/>Remind</button>
       <button className="btn-p" onClick={() => { setRec(null); setPayFor(r); }}><Ic n="check" s={14} sw={2.4}/>Record Payment</button>
@@ -1758,6 +2077,10 @@ function Invoices() {
       {payFor && <FormModal title={`Record Payment · ${payFor.number}`} submitLabel="Save Payment"
         initial={{ amount: payFor.balance }} fields={[{ key: 'amount', label: 'Amount (₹)', type: 'number' }]}
         onClose={() => setPayFor(null)} onSave={recordPayment}/>}
+      {editRow && <FormModal title={'Edit ' + editRow.number} submitLabel="Save Changes"
+        fields={entityEditFields('invoice')} initial={entityToInitial('invoice', editRow)}
+        onClose={() => setEditRow(null)}
+        onSave={(v) => { const row = DB.invoices.find((x) => x.id === editRow.id); if (row) entityApplyEdit('invoice', row, v); setEditRow(null); setRec(null); reload(); reloadStats(); }}/>}
       {printDoc && <PrintHost kind="invoice" doc={printDoc} onClose={() => setPrintDoc(null)}/>}
       <Drawer rec={rec} onClose={() => setRec(null)}/>
     </Shell>
@@ -1843,10 +2166,16 @@ function Customers() {
   };
   const deleteCustomer = (r) => {
     const links = customerLinkCount(r.name);
-    if (links > 0) { alert(`Cannot delete "${r.name}" — ${links} linked record(s) exist (quotes, invoices, jobs, tickets, AMC, equipment or repairs). Keep the customer for history.`); return; }
-    if (!confirm(`Delete customer "${r.name}"? Their saved device credentials will also be removed.`)) return;
+    const creds = DB.credentials.filter((c) => c.customer?.name === r.name).length;
+    if (links > 0) {
+      const extra = creds ? ` and ${creds} credential(s)` : '';
+      if (!confirm(
+        `Delete "${r.name}" and ALL ${links} linked record(s) (quotes, invoices, jobs, tickets, AMC, equipment, serials, repairs)${extra}? This cannot be undone. Export a backup first if you may need this data later.`,
+      )) return;
+      cascadeCustomerDelete(r.name);
+    } else if (!confirm(`Delete customer "${r.name}"?${creds ? ` ${creds} saved credential(s) will also be removed.` : ''}`)) return;
+    else cascadeCustomerDelete(r.name);
     const i = DB.customers.findIndex((x) => x.id === r.id); if (i >= 0) DB.customers.splice(i, 1);
-    for (let k = DB.credentials.length - 1; k >= 0; k--) if (DB.credentials[k].customer?.name === r.name) DB.credentials.splice(k, 1);
     setRec(null); reload();
   };
   const grantFreeAmc = (name) => {
@@ -2042,6 +2371,7 @@ function Tickets() {
   const path = '/tickets' + (filter ? '?status=' + filter : '');
   const { data, loading, reload } = useFetch(path, [path]);
   const [rec, setRec] = useState(null);
+  const [editRow, setEditRow] = useState(null);
   const rows = data?.data ?? [];
   const setTicketStatus = (r, status) => {
     const t = DB.tickets.find((x) => x.id === r.id); if (!t) return;
@@ -2072,6 +2402,8 @@ function Tickets() {
       </div></DwSection>}
     </>,
     foot: <>
+      <button className="btn-o" onClick={() => setEditRow(r)}><Ic n="sliders" s={14}/>Edit</button>
+      <button className="btn-o" style={{ color: 'var(--red)' }} onClick={() => { if (confirm('Delete this ticket?')) { entityDelete('ticket', r.id); setRec(null); reload(); } }}>Delete</button>
       {r.status === 'open' && <button className="btn-o" onClick={() => setTicketStatus(r, 'in_progress')}><Ic n="clock" s={14}/>Start</button>}
       {(r.status === 'open' || r.status === 'in_progress') && <button className="btn-o" onClick={() => setTicketStatus(r, 'on_hold')}>Hold</button>}
       {r.status === 'on_hold' && <button className="btn-o" onClick={() => setTicketStatus(r, 'in_progress')}><Ic n="clock" s={14}/>Resume</button>}
@@ -2106,6 +2438,10 @@ function Tickets() {
         )}
       </div>
       <Drawer rec={rec} onClose={() => setRec(null)}/>
+      {editRow && <FormModal title="Edit Ticket" submitLabel="Save Changes"
+        fields={entityEditFields('ticket')} initial={entityToInitial('ticket', editRow)}
+        onClose={() => setEditRow(null)}
+        onSave={(v) => { const row = DB.tickets.find((x) => x.id === editRow.id); if (row) entityApplyEdit('ticket', row, v); setEditRow(null); setRec(null); reload(); }}/>}
     </Shell>
   );
 }
@@ -2117,6 +2453,7 @@ function Amc() {
   const path = '/amc' + (filter ? '?filter=' + filter : '');
   const { data, loading, reload } = useFetch(path, [path]);
   const [rec, setRec] = useState(null);
+  const [editRow, setEditRow] = useState(null);
   const rows = data?.data ?? [];
   const renew = (r) => {
     const message = `Hello ${r.customer?.name || ''},\n\nYour AMC ${r.number} (${r.plan} plan, ${r.devices} devices) ${r.status === 'expired' ? 'expired' : 'is due for renewal'} on ${date(r.ends_on)}.\nRenewal value: ${inr(r.value)}/year.\n\nShall we schedule the renewal?\n\nRegards,\n${COMPANY.name}\n${COMPANY.phone}`;
@@ -2132,6 +2469,8 @@ function Amc() {
       ['Annual value', inr(r.value)], ['Status', <Pill t={AMC_STATUS[r.status][1]} dot>{AMC_STATUS[r.status][0]}</Pill>],
     ]}/></DwSection>,
     foot: <>
+      <button className="btn-o" onClick={() => setEditRow(r)}><Ic n="sliders" s={14}/>Edit</button>
+      <button className="btn-o" style={{ color: 'var(--red)' }} onClick={() => { if (confirm('Delete this AMC contract?')) { entityDelete('amc', r.id); setRec(null); reload(); } }}>Delete</button>
       <button className="btn-o" onClick={() => logVisit(r)}><Ic n="calendar" s={14}/>Log Visit</button>
       <button className="btn-p wa-btn" onClick={() => renew(r)}><Ic n="whatsapp" s={14}/>Send Renewal</button>
     </>,
@@ -2164,6 +2503,10 @@ function Amc() {
         )}
       </div>
       <Drawer rec={rec} onClose={() => setRec(null)}/>
+      {editRow && <FormModal title="Edit AMC Contract" submitLabel="Save Changes"
+        fields={entityEditFields('amc')} initial={entityToInitial('amc', editRow)}
+        onClose={() => setEditRow(null)}
+        onSave={(v) => { const row = DB.amc.find((x) => x.id === editRow.id); if (row) entityApplyEdit('amc', row, v); setEditRow(null); setRec(null); reload(); }}/>}
     </Shell>
   );
 }
@@ -2565,23 +2908,48 @@ function Settings() {
   const fileRef = useRef();
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
+  const [drive, setDrive] = useState({ configured: false, connected: false, email: '', clientId: '', hasSecret: false });
+  const [driveFiles, setDriveFiles] = useState(null);
+  const [oauthForm, setOauthForm] = useState(null);
+
+  const hasDriveApi = typeof window !== 'undefined' && window.electronAPI && typeof window.electronAPI.gdriveStatus === 'function';
+
+  const refreshDrive = async () => {
+    if (!hasDriveApi) return;
+    try {
+      const st = await window.electronAPI.gdriveStatus();
+      if (st) setDrive(st);
+    } catch (e) { /* ignore */ }
+  };
+  useEffect(() => { refreshDrive(); }, []);
+
+  const getCsvForBackup = async () => {
+    await flushToServer();
+    let csvText = buildBackupCsvText();
+    const memRows = countCsvRecords(csvText);
+    if (serverOK) {
+      try {
+        const res = await fetch(new URL('/backup/export', window.location.href).href + '?t=' + Date.now());
+        if (res.ok) {
+          const serverCsv = await res.text();
+          if (countCsvRecords(serverCsv) > memRows) csvText = serverCsv;
+        }
+      } catch (e) { /* keep in-memory */ }
+    }
+    return csvText;
+  };
+
   const exportCsv = async () => {
     setBusy(true); setMsg('');
     try {
-      await flushToServer();
-      let csvText = '';
-      try {
-        const res = await fetch('./backup/export?t=' + Date.now());
-        if (res.ok) csvText = await res.text();
-      } catch (e) { /* use in-memory fallback */ }
-      if (countCsvRecords(csvText) < 1) {
-        const blob = await buildBackupCsvBlob();
-        csvText = await blob.text();
-      }
+      const csvText = await getCsvForBackup();
       const rows = countCsvRecords(csvText);
       if (rows < 1) { setMsg('Nothing to export — add data first.'); return; }
-      downloadBackupCsv(csvText, 'cctv-erp-backup-' + new Date().toISOString().slice(0, 10) + '.csv');
-      setMsg(`Backup downloaded (${rows} records).`);
+      const filename = 'cctv-erp-backup-' + new Date().toISOString().slice(0, 10) + '.csv';
+      const savedPath = await downloadBackupCsv(csvText, filename);
+      setMsg(savedPath
+        ? `Backup saved (${rows} records) → ${savedPath}`
+        : `Backup downloaded (${rows} records).`);
     } catch { setMsg('Export failed.'); } finally { setBusy(false); }
   };
   const importCsv = async (e) => {
@@ -2591,19 +2959,102 @@ function Settings() {
     setBusy(true); setMsg('');
     try {
       const text = await file.text();
-      let restored = null;
-      try {
-        const res = await fetch('./backup/import', { method: 'POST', headers: { 'Content-Type': 'text/csv;charset=utf-8' }, body: text });
-        const r = await res.json();
-        if (res.ok && r.restored) restored = r.restored;
-      } catch (err) { /* fallback below */ }
-      if (!restored) restored = importBackupCsv(text);
+      const restored = await importBackupCsv(text);
       const total = Object.values(restored).reduce((a, b) => a + b, 0);
       setMsg(`Restored ${total} records across ${Object.keys(restored).length} tables. Reloading…`);
       setTimeout(() => window.location.reload(), 600);
-    } catch { setMsg('Restore failed — check the file format.'); }
+    } catch (err) {
+      setMsg(err.message ? `Restore failed — ${err.message}` : 'Restore failed — check the file format.');
+    }
     finally { setBusy(false); if (fileRef.current) fileRef.current.value = ''; }
   };
+
+  const saveOauth = async (v) => {
+    if (!hasDriveApi) return;
+    setBusy(true); setMsg('');
+    try {
+      const r = await window.electronAPI.gdriveSaveCredentials({ clientId: v.clientId, clientSecret: v.clientSecret });
+      setOauthForm(null);
+      await refreshDrive();
+      setMsg(r.configured ? 'Google OAuth credentials saved.' : 'Client ID is required.');
+    } catch (e) {
+      setMsg('Could not save Google credentials.');
+    } finally { setBusy(false); }
+  };
+
+  const connectDrive = async () => {
+    if (!hasDriveApi) { setMsg('Google Drive is only available in the desktop app.'); return; }
+    setBusy(true); setMsg('Opening Google sign-in…');
+    try {
+      const r = await window.electronAPI.gdriveConnect();
+      await refreshDrive();
+      setMsg(r.ok ? (`Connected to Google Drive${r.email ? ' as ' + r.email : ''}.`) : (r.error || 'Connect failed.'));
+    } catch (e) {
+      setMsg(e.message || 'Connect failed.');
+    } finally { setBusy(false); }
+  };
+
+  const disconnectDrive = async () => {
+    if (!hasDriveApi) return;
+    if (!confirm('Disconnect Google Drive from this PC?')) return;
+    await window.electronAPI.gdriveDisconnect();
+    setDriveFiles(null);
+    await refreshDrive();
+    setMsg('Google Drive disconnected.');
+  };
+
+  const backupToDrive = async () => {
+    if (!hasDriveApi) { setMsg('Google Drive is only available in the desktop app.'); return; }
+    setBusy(true); setMsg('');
+    try {
+      const csvText = await getCsvForBackup();
+      const rows = countCsvRecords(csvText);
+      if (rows < 1) { setMsg('Nothing to back up — add data first.'); return; }
+      const filename = 'cctv-erp-backup-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.csv';
+      const r = await window.electronAPI.gdriveUpload(csvText, filename);
+      if (!r.ok) { setMsg(r.error || 'Google Drive upload failed.'); return; }
+      setMsg(`Uploaded to Google Drive → ${r.folder}/${r.file?.name || filename} (${rows} records).`);
+    } catch (e) {
+      setMsg(e.message || 'Google Drive upload failed.');
+    } finally { setBusy(false); }
+  };
+
+  const openDriveRestore = async () => {
+    if (!hasDriveApi) { setMsg('Google Drive is only available in the desktop app.'); return; }
+    setBusy(true); setMsg('');
+    try {
+      const r = await window.electronAPI.gdriveList();
+      if (!r.ok) { setMsg(r.error || 'Could not list Drive backups.'); return; }
+      if (!r.files || !r.files.length) { setMsg('No backups found in Google Drive folder “Smart Vision ERP Backups”.'); return; }
+      setDriveFiles(r.files);
+      setMsg(`Found ${r.files.length} backup(s) on Google Drive — pick one to restore.`);
+    } catch (e) {
+      setMsg(e.message || 'Could not list Drive backups.');
+    } finally { setBusy(false); }
+  };
+
+  const restoreFromDrive = async (file) => {
+    if (!file?.id) return;
+    if (!confirm(`Restore will REPLACE all current data with:\n${file.name}\n\nContinue?`)) return;
+    setBusy(true); setMsg('Downloading from Google Drive…');
+    try {
+      const r = await window.electronAPI.gdriveDownload(file.id);
+      if (!r.ok || !r.csvText) { setMsg(r.error || 'Download failed.'); return; }
+      const restored = await importBackupCsv(r.csvText);
+      const total = Object.values(restored).reduce((a, b) => a + b, 0);
+      setDriveFiles(null);
+      setMsg(`Restored ${total} records from ${r.name || file.name}. Reloading…`);
+      setTimeout(() => window.location.reload(), 600);
+    } catch (e) {
+      setMsg(e.message || 'Restore from Google Drive failed.');
+    } finally { setBusy(false); }
+  };
+
+  const fmtDriveDate = (isoStr) => {
+    if (!isoStr) return '';
+    try { return new Date(isoStr).toLocaleString(); } catch (e) { return isoStr; }
+  };
+
   return (
     <Shell active="settings">
       <PageHead title="Settings" sub="Workspace · Smart Vision Enterprise, Borsad"/>
@@ -2612,19 +3063,89 @@ function Settings() {
         <div className="pah"><h3>Full Data Backup & Restore</h3><span className="sub">· CSV · every table</span></div>
         <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ fontSize: 12.5, color: 'var(--ink2)', fontWeight: 600, lineHeight: 1.5 }}>
-            Export downloads a single CSV containing all customers, leads, quotes, invoices, payments,
-            inventory, serials, jobs, tickets, AMC contracts, equipment and credentials. Restore replaces
-            the live database with a previously exported file — useful for migrating between hosts or
-            recovering after an offline period.
+            Export is Excel-friendly: one section per table (## customers, ## quotes, …) with normal columns.
+            Edit in Excel, leave id blank for new rows, use plain names for customer/owner links.
+            Line items use Description|Amount;… Duplicate names/numbers resolve on restore (last row wins).
+            Restore replaces all live data — export first if you may need a rollback. Old v1 JSON backups still restore.
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button className="btn-p" onClick={exportCsv} disabled={busy}><Ic n="download" s={14}/>Export full backup</button>
             <button className="btn-o" onClick={() => fileRef.current?.click()} disabled={busy}><Ic n="upload" s={14}/>Restore from CSV</button>
             <input ref={fileRef} type="file" accept=".csv" hidden onChange={importCsv}/>
           </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="pah"><h3>Google Drive Backup & Restore</h3><span className="sub">· cloud · same CSV format</span></div>
+        <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ fontSize: 12.5, color: 'var(--ink2)', fontWeight: 600, lineHeight: 1.5 }}>
+            Backups go to a Drive folder named <b>Smart Vision ERP Backups</b>.
+            Requires a Google Cloud <b>Desktop</b> OAuth client with the <b>Google Drive API</b> enabled.
+            Paste Client ID (and Secret) once, then Connect.
+          </div>
+          {!hasDriveApi && (
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--red)' }}>
+              Google Drive buttons work in the installed desktop app (not in a plain browser).
+            </div>
+          )}
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--ink2)' }}>
+            {drive.connected
+              ? <>Connected{drive.email ? <> as <span style={{ color: 'var(--a-ink)' }}>{drive.email}</span></> : ''}.</>
+              : drive.configured
+                ? 'OAuth configured — connect your Google account.'
+                : 'OAuth not configured yet.'}
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button className="btn-o" disabled={busy || !hasDriveApi}
+              onClick={() => setOauthForm({ clientId: drive.clientId || '', clientSecret: '' })}>
+              <Ic n="sliders" s={14}/>Google API credentials
+            </button>
+            {!drive.connected
+              ? <button className="btn-p" onClick={connectDrive} disabled={busy || !hasDriveApi || !drive.configured}>Connect Google Drive</button>
+              : <button className="btn-o" onClick={disconnectDrive} disabled={busy}>Disconnect</button>}
+            <button className="btn-p" onClick={backupToDrive} disabled={busy || !hasDriveApi || !drive.connected}>
+              <Ic n="upload" s={14}/>Backup to Google Drive
+            </button>
+            <button className="btn-o" onClick={openDriveRestore} disabled={busy || !hasDriveApi || !drive.connected}>
+              <Ic n="download" s={14}/>Restore from Google Drive
+            </button>
+          </div>
+          {driveFiles && (
+            <div style={{ border: '1px solid var(--ln)', borderRadius: 12, overflow: 'hidden' }}>
+              <div style={{ padding: '10px 12px', fontWeight: 800, fontSize: 13, background: 'var(--field)' }}>
+                Choose a Drive backup
+                <button className="btn-o" style={{ float: 'right', padding: '4px 10px' }} onClick={() => setDriveFiles(null)} disabled={busy}>Close</button>
+              </div>
+              <div className="tscroll" style={{ maxHeight: 260 }}>
+                <table className="tbl">
+                  <thead><tr><th>File</th><th>Created</th><th></th></tr></thead>
+                  <tbody>
+                    {driveFiles.map((f) => (
+                      <tr key={f.id}>
+                        <td className="t1">{f.name}</td>
+                        <td className="t2">{fmtDriveDate(f.createdTime || f.modifiedTime)}</td>
+                        <td><button className="btn-p" style={{ padding: '6px 10px' }} disabled={busy} onClick={() => restoreFromDrive(f)}>Restore</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
           {msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--a-ink)' }}>{msg}</div>}
         </div>
       </div>
+
+      {oauthForm && (
+        <FormModal title="Google OAuth credentials" submitLabel="Save"
+          initial={oauthForm}
+          fields={[
+            { key: 'clientId', label: 'Client ID (Desktop app)' },
+            { key: 'clientSecret', label: 'Client Secret (optional for some clients)', type: 'password' },
+          ]}
+          onClose={() => setOauthForm(null)} onSave={saveOauth}/>
+      )}
     </Shell>
   );
 }
@@ -2639,6 +3160,7 @@ function ServiceRepair() {
   const rows = data?.data ?? [];
   const [rec, setRec] = useState(null);
   const [printDoc, setPrintDoc] = useState(null);
+  const [editRow, setEditRow] = useState(null);
 
   const repairDoc = (r, kind) => {
     const items = [{ id: 1, description: `${kind === 'quote' ? 'Repair estimate' : 'Repair'} — ${r.device}${r.serial_no ? ' (' + r.serial_no + ')' : ''}`, amount: r.charge },
@@ -2685,6 +3207,8 @@ function ServiceRepair() {
       </div></DwSection>
     </>,
     foot: <>
+      <button className="btn-o" onClick={() => setEditRow(r)}><Ic n="sliders" s={14}/>Edit</button>
+      <button className="btn-o" style={{ color: 'var(--red)' }} onClick={() => { if (confirm('Delete this repair job?')) { entityDelete('repair', r.id); setRec(null); reload(); } }}>Delete</button>
       <button className="btn-o wa-btn" onClick={() => waRepair(r)}><Ic n="whatsapp" s={14}/>Update</button>
       <button className="btn-p" onClick={() => advance(r)} disabled={r.status === 'delivered'}><Ic n="check" s={14} sw={2.4}/>Advance</button>
     </>,
@@ -2718,6 +3242,10 @@ function ServiceRepair() {
         )}
       </div>
       <Drawer rec={rec} onClose={() => setRec(null)}/>
+      {editRow && <FormModal title="Edit Repair" submitLabel="Save Changes"
+        fields={entityEditFields('repair')} initial={entityToInitial('repair', editRow)}
+        onClose={() => setEditRow(null)}
+        onSave={(v) => { const row = DB.repairs.find((x) => x.id === editRow.id); if (row) entityApplyEdit('repair', row, v); setEditRow(null); setRec(null); reload(); }}/>}
       {printDoc && <PrintHost kind={printDoc.kind} doc={printDoc.doc} onClose={() => setPrintDoc(null)}/>}
     </Shell>
   );

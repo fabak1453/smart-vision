@@ -1,0 +1,5 @@
+{
+  "clientId": "",
+  "clientSecret": "",
+  "_comment": "Create a Google Cloud Desktop OAuth client, enable Google Drive API, then paste clientId + clientSecret here (or enter them in Settings)."
+}

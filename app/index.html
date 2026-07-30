@@ -18,8 +18,17 @@
       <input class="inp" id="username" name="username" type="text" autocomplete="username" required>
       <label class="field-l" for="password">Password</label>
       <input class="inp" id="password" name="password" type="password" autocomplete="current-password" required>
+      <label class="chk" for="remember">
+        <input type="checkbox" id="remember" checked>
+        <span>Remember username</span>
+      </label>
+      <label class="chk" for="auto-login">
+        <input type="checkbox" id="auto-login">
+        <span>Sign in automatically next time</span>
+      </label>
       <div class="err" id="login-err" role="alert"></div>
-      <button class="btn-p" type="submit">Sign in</button>
+      <button class="btn-p" type="submit" id="login-btn">Sign in</button>
+      <button class="btn-link" type="button" id="forget-btn" hidden>Forget saved login</button>
     </form>
   </div>
   <script src="./login.js"></script>

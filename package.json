@@ -1,7 +1,7 @@
 {
   "name": "smart-vision-erp",
   "productName": "Smart Vision ERP",
-  "version": "5.1.0",
+  "version": "9.0.0",
   "private": true,
   "description": "Smart Vision Enterprise \u2014 CCTV ERP (Windows desktop, SQLite)",
   "main": "electron/main.js",
@@ -54,7 +54,9 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "Smart Vision ERP"
+      "createStartMenuShortcut": true,
+      "shortcutName": "Smart Vision ERP",
+      "artifactName": "Smart Vision ERP Setup ${version}.exe"
     }
   }
 }

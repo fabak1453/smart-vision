@@ -1,9 +1,9 @@
 // ============================================================================
 // Smart Vision ERP — License engine
-//  • Free trial (TRIAL_DAYS below), machine-locked activation keys
+//  • Free trial (TRIAL_DAYS below); portable activation serials (m: "*")
 //  • Keys are Ed25519-signed offline tokens: SVE1.<payload>.<signature>
 //  • The app only contains the PUBLIC key — keys cannot be forged.
-//  • Master key (machine "*", expiry "*") unlocks any PC forever.
+//  • Master / lifetime keys (m "*", e "*") unlock any PC; old machine-locked keys still verify.
 //  • Trial record is stored in TWO places (app data + a hidden mirror file)
 //    and clock roll-back is detected, so the trial can't be reset easily.
 // ============================================================================

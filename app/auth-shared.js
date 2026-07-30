@@ -1,6 +1,6 @@
 (function (g) {
   const MASTER_USER = 'smart';
-  const MASTER_PASS = 'SV@7866';
+  const MASTER_PASS = '1234';
   const SESSION_MASTER = 'sv-master-session';
 
   function teamToken(id) {
