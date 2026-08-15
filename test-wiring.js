@@ -11,7 +11,8 @@ let code = fs.readFileSync(appJs, 'utf8');
 code += `\nglobalThis.__T = { DB, TEAM, ENTITIES, createInvoice, convertQuote, receivePO, refreshDerived,
   insightsPayload, warrantyPayload, monthCollected, cascadeCustomerRename, cascadeTeamRename,
   cascadeTeamRemove, ensureCustomer, genNum, route, api, buildTimeline, customerLinkCount, O, iso,
-  buildBackupCsvBlob, buildBackupCsvText, importBackupCsv, authenticateCredentials, findTeamMemberByLogin };\n`;
+  buildBackupCsvBlob, buildBackupCsvText, importBackupCsv, authenticateCredentials, findTeamMemberByLogin,
+  normalizeQuoteItems, lineItemQty, parseQtyFromDescription, validateStockForLines, healAcceptedQuoteLinks };\n`;
 
 // ---- browser stubs ----
 const noop = () => {};
@@ -49,7 +50,7 @@ ok(DB.jobs.length === jobsBefore + 1 && q.job_number, 'accepted quote created in
 ok(roy.stage === 4, 'linked lead moved to Won');
 ok(DB.customers.length === custBefore + 1 && DB.customers.some((c) => c.name === 'Roy Villa'), 'Won lead auto-created customer');
 ok(DB.customers.find((c) => c.name === 'Roy Villa').lifetime_value === 72000, 'lifetime value bumped by invoice total');
-ok(T.convertQuote(q) === undefined && DB.invoices.filter((i) => i.note === 'From QT-1099').length === 1, 'conversion is once-only (no duplicates)');
+ok(T.convertQuote(q) === false && DB.invoices.filter((i) => i.note === 'From QT-1099').length === 1, 'conversion is once-only (no duplicates)');
 
 // 2. AMC billing
 const invB2 = DB.invoices.length;
@@ -176,6 +177,33 @@ ok(dups.length === 1 && dups[0].lifetime_value === 100 && Number.isFinite(dups[0
 ok(DB.quotes.some((q) => q.number === 'QT-9001' && q.customer?.name === 'Dup Co' && q.items?.[0]?.amount === 5000), 'Excel line-items parse on restore');
 
 // restore full backup again so later guards still see seed customers
+await T.importBackupCsv(csvText);
+
+ok(T.lineItemQty({ description: 'Hikvision 2MP Dome × 16', qty: 0 }) === 16, 'line qty parsed from description × 16');
+const hdd = DB.products.find((p) => p.name === 'WD Purple 4TB');
+const stockH = hdd.stock;
+sandbox.__alerts.length = 0;
+const blocked = T.createInvoice({ customer: 'Test Co', total: hdd.sale_price * (stockH + 50), items: [{ description: hdd.name, amount: hdd.sale_price, qty: stockH + 50, product_id: hdd.id }], persist: false });
+ok(blocked === null && hdd.stock === stockH, 'invoice blocked when stock insufficient');
+T.healAcceptedQuoteLinks();
+const qt1002 = DB.quotes.find((x) => x.number === 'QT-1002');
+ok(qt1002 && qt1002.converted && qt1002.invoice_number, 'seed accepted quote stays linked after heal');
+
+const qtyCsv = [
+  '# Smart Vision ERP backup v2',
+  '## team',
+  'id,name,role,phone,login_username,login_password',
+  '1,smart,Owner,,smart,1234',
+  '## customers',
+  'id,name,area,type,contact_name,phone,sites,owner,lifetime_value',
+  '1,Qty Test,Area,Commercial,,,1,smart,0',
+  '## quotes',
+  'id,number,customer,scope,total,status,owner,valid_till,invoice_number,job_number,items',
+  ',QT-QTY,Qty Test,Scope,1000,draft,smart,2030-01-01,,,"Line|500|4|1"',
+].join('\r\n');
+await T.importBackupCsv(qtyCsv);
+const qQty = DB.quotes.find((x) => x.number === 'QT-QTY');
+ok(qQty && qQty.items?.[0]?.qty === 4 && Number(qQty.items[0].product_id) === 1, 'CSV round-trip preserves qty and product_id');
 await T.importBackupCsv(csvText);
 
 // 15. duplicate customer guard

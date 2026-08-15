@@ -312,10 +312,11 @@ button{font-family:inherit;cursor:pointer}
 .sh-table td{padding:9px 12px;border-bottom:1px solid #ececec;vertical-align:top}
 .sh-terms{font-size:10.5px;color:#5d6470;line-height:1.6;border-top:1px solid #eee;padding-top:12px;margin-top:20px}
 @media print{
-  html,body{height:auto!important;overflow:visible!important;background:#fff!important}
-  .app{display:none!important}
+  html,body{height:auto!important;overflow:visible!important;background:#fff!important;margin:0;padding:0}
+  body *{visibility:hidden}
+  .print-host,.print-host *{visibility:visible}
+  .print-host{position:absolute!important;inset:0!important;display:block!important;overflow:visible!important;background:#fff!important;z-index:99999!important}
   .no-print{display:none!important}
-  .print-host{position:static!important;display:block!important;overflow:visible!important;background:#fff!important}
   .sheet-wrap{padding:0!important;display:block!important}
   .sheet{width:auto!important;min-height:auto!important;box-shadow:none!important;padding:0!important}
   @page{size:A4;margin:14mm}

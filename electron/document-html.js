@@ -50,9 +50,17 @@ function totalsBlock(total, extraHtml) {
     </div>`;
 }
 
+function resolveLogoSrc(logo) {
+  if (!logo) return '';
+  const s = String(logo);
+  if (s.startsWith('data:') || s.startsWith('http://') || s.startsWith('https://')) return esc(s);
+  return esc('/' + s.replace(/^\.\//, ''));
+}
+
 function buildDocumentHtml(kind, doc, company, customer) {
   const co = company || {};
   const c = customer || {};
+  const logoSrc = resolveLogoSrc(co.logo);
   const itemsHtml = itemsRows(doc.items, doc.total, doc.scope);
   const party = `
     <div>
@@ -81,7 +89,7 @@ function buildDocumentHtml(kind, doc, company, customer) {
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(doc.number)}</title><style>${BASE_STYLE}</style></head><body>
     <div class="head">
-      <div><img src="${esc(co.logo || '')}" alt="" style="height:58px;max-width:260px;object-fit:contain"/></div>
+      <div><img src="${logoSrc}" alt="" style="height:58px;max-width:260px;object-fit:contain"/></div>
       <div class="co"><b>${esc(co.name)}</b><br/>${esc(co.address)}<br/>${esc(co.phone)} · ${esc(co.email)}<br/>${esc(co.web)}${co.gstin ? ' · GSTIN ' + esc(co.gstin) : ''}</div>
     </div>
     <div style="display:flex;justify-content:space-between;margin-bottom:14px">

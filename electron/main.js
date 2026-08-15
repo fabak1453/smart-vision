@@ -272,14 +272,22 @@ ipcMain.handle('whatsapp:open', async (_e, payload) => {
     try {
       pdfWin = new BrowserWindow({
         show: false,
-        webPreferences: { sandbox: true, contextIsolation: true },
+        webPreferences: { sandbox: false, contextIsolation: true },
       });
       await pdfWin.loadURL(pdfUrl);
-      await new Promise((r) => setTimeout(r, 900));
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('PDF page load timeout')), 15000);
+        pdfWin.webContents.once('did-finish-load', () => { clearTimeout(t); resolve(); });
+      });
+      try {
+        await pdfWin.webContents.executeJavaScript('document.fonts && document.fonts.ready');
+      } catch (e) { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 350));
       const buf = await pdfWin.webContents.printToPDF({
         printBackground: true,
         marginsType: 1,
       });
+      if (!buf || buf.length < 500) throw new Error('PDF buffer empty');
       const safeName = String(filename).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
       savedPath = path.join(app.getPath('downloads'), safeName);
       fs.writeFileSync(savedPath, buf);
@@ -323,7 +331,22 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // ------------------------------------------------------------------ boot ---
+let appQuitting = false;
 if (gotLock) {
+  app.on('before-quit', async (e) => {
+    if (appQuitting || !mainWin || mainWin.isDestroyed()) return;
+    e.preventDefault();
+    appQuitting = true;
+    try {
+      await mainWin.webContents.executeJavaScript(
+        '(typeof window.__svFlush === "function" ? window.__svFlush() : Promise.resolve(true))',
+        true
+      );
+    } catch (err) { /* ignore */ }
+    try { store.close(); } catch (e2) { /* ignore */ }
+    app.exit(0);
+  });
+
   app.whenReady().then(async () => {
     try {
       const userData = app.getPath('userData');

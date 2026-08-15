@@ -364,10 +364,15 @@ const DB = {
     status: 'accepted',
     owner: O('Priya Kulkarni'),
     valid_till: iso(15),
+    converted: true,
+    invoice_number: 'INV-2002',
+    job_number: 'JOB-3006',
     items: [{
       id: 1,
       description: 'Hikvision 2MP Dome × 4',
-      amount: 6600
+      amount: 6600,
+      qty: 4,
+      product_id: 1
     }, {
       id: 2,
       description: 'DVR 4ch + 1TB',
@@ -1410,6 +1415,7 @@ const api = {
       if (l && l.stage < 4) {
         l.stage++;
         if (l.stage === 4) ensureCustomer(l);
+        afterMutation();
       }
       return res({
         ok: true
@@ -1454,14 +1460,15 @@ function useFetch(path, deps = []) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const reload = useCallback(() => {
-    setLoading(true);
     api.get(path).then(d => {
       setData(d);
       setError(null);
     }).catch(e => setError(e)).finally(() => setLoading(false));
   }, [path]);
   useEffect(() => {
-    reload(); /* eslint-disable-next-line */
+    setLoading(true);
+    reload();
+    /* eslint-disable-next-line */
   }, deps);
   return {
     data,
@@ -1732,9 +1739,44 @@ const TEAM = [{
   login_password: '1234'
 }, {
   id: 2,
+  name: 'Rohit Sharma',
+  role: 'Sales Lead',
+  phone: '94261 77057'
+}, {
+  id: 3,
+  name: 'Priya Kulkarni',
+  role: 'Sales Executive',
+  phone: '98500 22743'
+}, {
+  id: 4,
+  name: 'Amit Naik',
+  role: 'Sales Executive',
+  phone: '98230 77561'
+}, {
+  id: 5,
   name: 'Akram Suli',
   role: 'Technician',
   phone: '98220 41187'
+}, {
+  id: 6,
+  name: 'Vikram Jadhav',
+  role: 'Senior Technician',
+  phone: '98810 67234'
+}, {
+  id: 7,
+  name: 'Santosh More',
+  role: 'Technician',
+  phone: '97650 28194'
+}, {
+  id: 8,
+  name: 'Imran Shaikh',
+  role: 'Technician',
+  phone: '99201 44556'
+}, {
+  id: 9,
+  name: 'Datta Pawar',
+  role: 'Technician',
+  phone: '98905 11220'
 }];
 function ensureTeamLoginDefaults() {
   TEAM.forEach(t => {
@@ -1773,8 +1815,11 @@ const COMPANY = (() => {
 })();
 function saveCompany(patch) {
   Object.assign(COMPANY, patch);
-  localStorage.setItem('sv_company', JSON.stringify(COMPANY));
-  lastSaved = ''; // force next persist tick to include company
+  try {
+    localStorage.setItem('sv_company', JSON.stringify(COMPANY));
+  } catch (e) {/* ignore */}
+  lastSaved = '';
+  return afterMutation();
 }
 const HD_ITEMS = ['4 CH DVR', '2 MP HD Camera — 4 Nos', '1 TB HDD', 'Power Supply', 'Connector', 'Including 50 Mtr. Cable'];
 const IP_ITEMS = ['4 CH NVR', '2 MP IP Camera — 4 Nos', '1 TB HDD', '4 Port POE', 'Connector', 'Including 50 Mtr. Cable'];
@@ -1847,8 +1892,11 @@ const CATALOG = (() => {
 })();
 const CATALOG_GROUPS = ['HD Camera Solution', 'IP Camera Solution', 'AMC Plan'];
 function saveCatalog() {
-  localStorage.setItem('sv_catalog', JSON.stringify(CATALOG));
+  try {
+    localStorage.setItem('sv_catalog', JSON.stringify(CATALOG));
+  } catch (e) {/* legacy cache */}
   lastSaved = '';
+  return afterMutation();
 }
 
 /* ---------------- data persistence (server-shared, with local fallback) ----------------
@@ -1858,6 +1906,7 @@ function saveCatalog() {
      back to this browser's localStorage. */
 const API_URL = './api.php';
 const PERSIST_KEY = 'sv_state_v1';
+const SAVE_FAIL_MSG = 'Could not save to disk. Keep the app open and try again, or export a backup from Settings.';
 let serverOK = false;
 function stateRecordCount(s) {
   if (!s || typeof s !== 'object') return 0;
@@ -1909,67 +1958,38 @@ function snapshotState() {
     savedAt: Date.now()
   };
 }
-(function boot() {
-  let serverState = null;
-  try {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', API_URL + '?t=' + Date.now(), false); // sync so DB is ready before first render
-    xhr.send(null);
-    if (xhr.status >= 200 && xhr.status < 300) {
-      serverOK = true;
-      try {
-        serverState = JSON.parse(xhr.responseText || 'null');
-      } catch (e) {
-        serverState = null;
-      }
-    }
-  } catch (e) {/* no backend reachable */}
-  let localState = null;
-  try {
-    localState = JSON.parse(localStorage.getItem(PERSIST_KEY) || 'null');
-  } catch (e) {/* ignore */}
-  const sc = stateRecordCount(serverState);
-  const lc = stateRecordCount(localState);
-  const sAt = Number(serverState && serverState.savedAt) || 0;
-  const lAt = Number(localState && localState.savedAt) || 0;
-  const healServer = state => {
-    if (!serverOK) return;
-    try {
-      const payload = JSON.stringify({
-        ...state,
-        savedAt: Date.now()
-      });
-      fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: payload,
-        keepalive: true
-      });
-    } catch (e) {/* ignore */}
-  };
-
-  // Prefer whichever snapshot actually has data. Empty server `{}` must NOT keep seed
-  // demo in memory — that used to overwrite real saves on the next persist tick.
-  if (sc > 0 && lc > 0) {
-    if (lAt > sAt || lAt === sAt && lc > sc) {
-      applyState(localState);
-      if (lAt > sAt || lc > sc) healServer(localState);
-    } else {
-      applyState(serverState);
-    }
-  } else if (sc > 0) {
-    applyState(serverState);
-  } else if (lc > 0) {
-    applyState(localState);
-    healServer(localState);
-  }
-  // else: first run — keep in-file seed demo until the user edits / restores
-  ensureTeamLoginDefaults();
-})();
 let lastSaved = '';
-function persistState() {
+let persistQueue = Promise.resolve();
+async function persistStateNow() {
+  let payload;
+  try {
+    payload = JSON.stringify(snapshotState());
+  } catch (e) {
+    return false;
+  }
+  if (payload === lastSaved) return true;
+  lastSaved = payload;
+  let localOk = true;
+  try {
+    localStorage.setItem(PERSIST_KEY, payload);
+  } catch (e) {
+    localOk = false;
+  }
+  if (!serverOK) return localOk;
+  try {
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: payload
+    });
+    return localOk && res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+function writeStateSync() {
   let payload;
   try {
     payload = JSON.stringify(snapshotState());
@@ -1994,11 +2014,109 @@ function persistState() {
     } catch (e) {/* ignore */}
   }
 }
+function tableCount(state, key) {
+  const rows = state && state.DB && state.DB[key];
+  return Array.isArray(rows) ? rows.length : 0;
+}
+function shouldPreferLocalSnapshot(localState, serverState, lc, sc, lAt, sAt) {
+  if (lAt > sAt) return true;
+  if (lAt < sAt) return false;
+  if (lc > sc) return true;
+  if (lc < sc) return false;
+  for (const k of Object.keys(DB)) {
+    const dl = tableCount(localState, k);
+    const ds = tableCount(serverState, k);
+    if (dl !== ds) return dl > ds;
+  }
+  const lcCat = Array.isArray(localState && localState.CATALOG) ? localState.CATALOG.length : 0;
+  const scCat = Array.isArray(serverState && serverState.CATALOG) ? serverState.CATALOG.length : 0;
+  if (lcCat !== scCat) return lcCat > scCat;
+  const lt = Array.isArray(localState && localState.TEAM) ? localState.TEAM.length : 0;
+  const st = Array.isArray(serverState && serverState.TEAM) ? serverState.TEAM.length : 0;
+  if (lt !== st) return lt > st;
+  return false;
+}
+async function commitChange(work) {
+  if (work) await Promise.resolve(work());
+  const ok = await afterMutation();
+  if (!ok && typeof alert === 'function') alert(SAVE_FAIL_MSG);
+  return ok;
+}
+function afterMutation() {
+  if (typeof window !== 'undefined') {
+    try {
+      window.dispatchEvent(new CustomEvent('sv-persist-start'));
+    } catch (e) {/* ignore */}
+  }
+  persistQueue = persistQueue.then(async () => {
+    const ok = await persistStateNow();
+    if (typeof window !== 'undefined') {
+      try {
+        window.dispatchEvent(new CustomEvent('sv-persist', {
+          detail: {
+            ok
+          }
+        }));
+      } catch (e) {/* ignore */}
+    }
+    return ok;
+  });
+  return persistQueue;
+}
+(function boot() {
+  let serverState = null;
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', API_URL + '?t=' + Date.now(), false); // sync so DB is ready before first render
+    xhr.send(null);
+    if (xhr.status >= 200 && xhr.status < 300) {
+      serverOK = true;
+      try {
+        serverState = JSON.parse(xhr.responseText || 'null');
+      } catch (e) {
+        serverState = null;
+      }
+    }
+  } catch (e) {/* no backend reachable */}
+  let localState = null;
+  try {
+    localState = JSON.parse(localStorage.getItem(PERSIST_KEY) || 'null');
+  } catch (e) {/* ignore */}
+  const sc = stateRecordCount(serverState);
+  const lc = stateRecordCount(localState);
+  const sAt = Number(serverState && serverState.savedAt) || 0;
+  const lAt = Number(localState && localState.savedAt) || 0;
+
+  // Prefer whichever snapshot actually has data. Empty server `{}` must NOT keep seed
+  // demo in memory — that used to overwrite real saves on the next persist tick.
+  if (sc > 0 && lc > 0) {
+    if (shouldPreferLocalSnapshot(localState, serverState, lc, sc, lAt, sAt)) applyState(localState);else applyState(serverState);
+  } else if (sc > 0) {
+    applyState(serverState);
+  } else if (lc > 0) {
+    applyState(localState);
+  }
+  // else: first run — keep in-file seed demo until the user edits / restores
+  ensureTeamLoginDefaults();
+  healAcceptedQuoteLinks();
+  try {
+    const leg = JSON.parse(localStorage.getItem('sv_catalog') || 'null');
+    if (Array.isArray(leg) && leg.length && leg.length > CATALOG.length) applyCatalog(leg);
+  } catch (e) {/* ignore */}
+  if (serverOK && (sc > 0 || lc > 0)) {
+    queueMicrotask(() => {
+      afterMutation();
+    });
+  }
+})();
+function persistState() {
+  afterMutation();
+}
 if (typeof window !== 'undefined') {
   setInterval(persistState, 1500);
-  window.addEventListener('beforeunload', persistState);
+  window.addEventListener('beforeunload', writeStateSync);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) persistState();
+    if (document.hidden) writeStateSync();
   });
 }
 
@@ -2013,10 +2131,7 @@ const SvCsv = typeof globalThis !== 'undefined' && globalThis.SvBackupCsv || (ty
 if (!SvCsv) throw new Error('backup-csv.js not loaded — include app/backup-csv.js before the app');
 const BACKUP_CSV_MARKER = SvCsv.MARKER_V2 || SvCsv.MARKER;
 function buildBackupCsvText() {
-  return SvCsv.stateToCsv({
-    DB,
-    TEAM
-  });
+  return SvCsv.stateToCsv(snapshotState());
 }
 function buildBackupCsvBlob() {
   return new Blob([buildBackupCsvText()], {
@@ -2054,33 +2169,12 @@ async function importBackupCsv(text) {
   await persistStateNow();
   return counts;
 }
-async function persistStateNow() {
-  let payload;
-  try {
-    payload = JSON.stringify(snapshotState());
-  } catch (e) {
-    return false;
-  }
-  lastSaved = payload;
-  try {
-    localStorage.setItem(PERSIST_KEY, payload);
-  } catch (e) {/* ignore */}
-  if (!serverOK) return true;
-  try {
-    const res = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: payload
-    });
-    return res.ok;
-  } catch (e) {
-    return false;
-  }
-}
 async function flushToServer() {
   await persistStateNow();
+}
+if (typeof window !== 'undefined') {
+  window.__svFlush = flushToServer;
+  window.flushToServer = flushToServer;
 }
 function countCsvRecords(csvText) {
   return SvCsv.countCsvRecords(csvText);
@@ -2122,14 +2216,96 @@ function bumpLTV(name, amount) {
 }
 // One place that creates invoices — used by manual create, accepted quotes,
 // AMC billing and chargeable repairs — so LTV & numbering stay consistent.
+function findProductForLine(desc, productId) {
+  const pid = num(productId);
+  if (pid) {
+    const byId = DB.products.find(x => x.id === pid);
+    if (byId) return byId;
+  }
+  const d = String(desc || '').trim();
+  if (!d) return null;
+  const exact = DB.products.find(x => x.name === d);
+  if (exact) return exact;
+  let best = null;
+  DB.products.forEach(p => {
+    if (d.includes(p.name) && (!best || p.name.length > best.name.length)) best = p;
+  });
+  return best;
+}
+function parseQtyFromDescription(desc) {
+  const d = String(desc || '');
+  const m = d.match(/[×x]\s*(\d+)\s*$/i) || d.match(/\b(\d+)\s*(?:nos|units|pcs)\b/i);
+  return m ? num(m[1]) : 0;
+}
+function lineItemQty(it) {
+  const fromField = num(it.qty);
+  if (fromField > 0) return fromField;
+  const fromDesc = parseQtyFromDescription(it.description);
+  return fromDesc > 0 ? fromDesc : 1;
+}
+function normalizeQuoteItems(raw) {
+  const out = [];
+  (raw || []).forEach(i => {
+    const description = String(i.description || '').trim();
+    if (!description) return;
+    const p = findProductForLine(description, i.product_id);
+    const qty = lineItemQty(i);
+    out.push({
+      id: out.length + 1,
+      description,
+      amount: num(i.amount),
+      qty,
+      product_id: p ? p.id : num(i.product_id) || null
+    });
+  });
+  return out;
+}
+function validateStockForLines(lines) {
+  const warnings = [];
+  let blocked = false;
+  (lines || []).forEach(it => {
+    const qty = lineItemQty(it);
+    const p = findProductForLine(it.description, it.product_id);
+    if (!p) return;
+    if (p.track_serials) {
+      warnings.push(`${p.name}: assign ${qty} serial(s) via Serials / Equipment (not auto-deducted on invoice)`);
+      return;
+    }
+    if (num(p.stock) < qty) {
+      warnings.push(`${p.name}: need ${qty}, only ${p.stock} in stock`);
+      blocked = true;
+    }
+  });
+  return {
+    warnings,
+    blocked
+  };
+}
+function issueStockFromLines(lines, {
+  allowNegative = false
+} = {}) {
+  const warnings = [];
+  (lines || []).forEach(it => {
+    const qty = lineItemQty(it);
+    const p = findProductForLine(it.description, it.product_id);
+    if (!p) return;
+    if (p.track_serials) return;
+    if (!allowNegative && num(p.stock) < qty) return;
+    p.stock = Math.max(0, num(p.stock) - qty);
+  });
+  return warnings;
+}
 function createInvoice({
   customer,
   total,
   dueDays = 15,
   items = [],
-  note = ''
+  note = '',
+  issueStock = true,
+  persist = true
 }) {
   const t = num(total);
+  const normItems = items && items.length ? normalizeQuoteItems(items) : [];
   const inv = {
     id: nextId(DB.invoices),
     number: genNum('INV-', DB.invoices, 2000),
@@ -2140,13 +2316,35 @@ function createInvoice({
     status: 'sent',
     issue_date: iso(0),
     due_date: iso(dueDays),
-    items,
+    items: normItems.length ? normItems : items,
     note,
     payments: []
   };
+  if (issueStock && normItems.length) {
+    const pre = validateStockForLines(normItems);
+    if (pre.blocked) {
+      if (typeof alert === 'function') alert('Invoice not created — fix stock first:\n' + pre.warnings.join('\n'));
+      return null;
+    }
+    issueStockFromLines(normItems);
+    if (pre.warnings.length) inv.stock_note = pre.warnings.join('; ');
+  }
   DB.invoices.push(inv);
   bumpLTV(customer, t);
+  if (persist) afterMutation();
   return inv;
+}
+function healAcceptedQuoteLinks() {
+  DB.quotes.forEach(q => {
+    if (q.status !== 'accepted' || q.converted) return;
+    const inv = DB.invoices.find(i => i.note === 'From ' + q.number || i.customer?.name === q.customer?.name && Math.abs(num(i.total) - num(q.total)) < 1);
+    const job = DB.jobs.find(j => j.customer?.name === q.customer?.name && String(j.scope || '').includes(q.number));
+    if (inv || job) {
+      q.converted = true;
+      if (inv && !q.invoice_number) q.invoice_number = inv.number;
+      if (job && !q.job_number) q.job_number = job.number;
+    }
+  });
 }
 // Lead won → make sure the customer exists in the Customers module.
 function ensureCustomer(lead) {
@@ -2165,9 +2363,8 @@ function ensureCustomer(lead) {
 }
 // Accepted quote → invoice + installation job + mark lead as Won (once).
 function convertQuote(q) {
-  if (!q || q.converted || q.status !== 'accepted') return;
+  if (!q || q.converted || q.status !== 'accepted') return false;
   q.converted = true;
-  // make sure the customer exists first, so the invoice's LTV bump lands
   const lead = DB.leads.find(l => l.name === q.customer.name && l.stage < 4);
   if (lead) {
     lead.stage = 4;
@@ -2182,9 +2379,15 @@ function convertQuote(q) {
     customer: q.customer.name,
     total: q.total,
     items: q.items || [],
-    note: 'From ' + q.number
+    note: 'From ' + q.number,
+    persist: false
   });
+  if (!inv) {
+    q.converted = false;
+    return false;
+  }
   q.invoice_number = inv.number;
+  if (inv.stock_note) q.stock_note = inv.stock_note;
   const job = {
     id: nextId(DB.jobs),
     number: genNum('JOB-', DB.jobs, 3000),
@@ -2199,6 +2402,8 @@ function convertQuote(q) {
   };
   DB.jobs.push(job);
   q.job_number = job.number;
+  afterMutation();
+  return true;
 }
 // PO received → stock in (matches line items to products by name, once).
 function receivePO(po) {
@@ -2208,6 +2413,7 @@ function receivePO(po) {
     const p = DB.products.find(x => x.name === it.description);
     if (p) p.stock = num(p.stock) + num(it.qty);
   });
+  afterMutation();
 }
 // Live derived statuses — recomputed from dates on every read so nothing
 // stays frozen in time (invoices→overdue, AMC→expiring/expired, warranty).
@@ -2449,19 +2655,27 @@ const ENTITIES = {
       options: teamNames
     }],
     create: v => {
+      const scope = (v.scope || '').trim();
+      const total = num(v.total);
+      const items = scope ? [{
+        id: 1,
+        description: scope,
+        amount: total,
+        qty: 1
+      }] : [];
       const q = {
         id: nextId(DB.quotes),
         number: genNum('QT-', DB.quotes, 1000),
         customer: O(v.customer),
-        scope: v.scope,
-        total: num(v.total),
+        scope: scope || 'Custom quotation',
+        total,
         status: v.status || 'draft',
         owner: O(v.owner || teamNames()[0]),
         valid_till: iso(15),
-        items: []
+        items
       };
       DB.quotes.push(q);
-      convertQuote(q);
+      if (q.status === 'accepted') convertQuote(q);
     }
   },
   invoice: {
@@ -2493,7 +2707,8 @@ const ENTITIES = {
         total: num(v.total),
         dueDays: num(v.due_days) || 15
       });
-      if (v.status && v.status !== 'sent') inv.status = v.status;
+      if (inv && v.status && v.status !== 'sent') inv.status = v.status;
+      return inv != null;
     }
   },
   customer: {
@@ -2529,10 +2744,13 @@ const ENTITIES = {
     }],
     create: v => {
       const nm = (v.name || '').trim();
-      if (!nm) return;
+      if (!nm) {
+        alert('Enter a customer name.');
+        return false;
+      }
       if (DB.customers.some(c => c.name.toLowerCase() === nm.toLowerCase())) {
         alert(`A customer named "${nm}" already exists — open that record instead of creating a duplicate.`);
-        return;
+        return false;
       }
       DB.customers.push({
         id: nextId(DB.customers),
@@ -2545,6 +2763,7 @@ const ENTITIES = {
         owner: O(v.owner || teamNames()[0]),
         lifetime_value: 0
       });
+      return true;
     }
   },
   job: {
@@ -2701,9 +2920,10 @@ const ENTITIES = {
         const inv = createInvoice({
           customer: v.customer,
           total: a.value,
-          note: 'AMC ' + a.number + ' — annual charge'
+          note: 'AMC ' + a.number + ' — annual charge',
+          issueStock: false
         });
-        a.invoice_number = inv.number;
+        if (inv) a.invoice_number = inv.number;
       }
     }
   },
@@ -3061,6 +3281,7 @@ function entityDelete(entity, id) {
   const i = DB[table].findIndex(x => x.id === id);
   if (i < 0) return false;
   DB[table].splice(i, 1);
+  afterMutation();
   return true;
 }
 function entityEditFields(entity) {
@@ -3419,157 +3640,164 @@ function entityToInitial(entity, r) {
 }
 function entityApplyEdit(entity, row, v) {
   if (!row) return;
-  if (entity === 'job') {
-    Object.assign(row, {
-      customer: O(v.customer),
-      type: v.type || row.type,
-      scope: v.scope,
-      scheduled_on: v.scheduled_on || row.scheduled_on,
-      slot: v.slot || 'TBD',
-      technician: v.technician ? O(v.technician) : null,
-      status: v.status || row.status
-    });
-    return;
-  }
-  if (entity === 'ticket') {
-    Object.assign(row, {
-      customer: O(v.customer),
-      issue: v.issue,
-      priority: v.priority || row.priority,
-      coverage: v.coverage || row.coverage,
-      assignee: v.assignee ? O(v.assignee) : null,
-      status: v.status || row.status,
-      sla_state: v.sla_state || row.sla_state
-    });
-    return;
-  }
-  if (entity === 'amc') {
-    Object.assign(row, {
-      customer: O(v.customer),
-      plan: v.plan || row.plan,
-      devices: num(v.devices),
-      value: num(v.value),
-      visits_total: num(v.visits_total) || row.visits_total,
-      visits_used: num(v.visits_used),
-      starts_on: v.starts_on || row.starts_on,
-      ends_on: v.ends_on || row.ends_on,
-      status: v.status || row.status
-    });
-    return;
-  }
-  if (entity === 'equipment') {
-    Object.assign(row, {
-      name: v.name,
-      customer: O(v.customer),
-      product: O(v.name),
-      location: v.location,
-      serial: {
-        serial_no: v.serial_no || '—'
-      },
-      installed_on: v.installed_on || row.installed_on,
-      warranty_end: v.warranty_end || row.warranty_end,
-      in_warranty: v.warranty_end ? new Date(v.warranty_end).getTime() > Date.now() : row.in_warranty
-    });
-    return;
-  }
-  if (entity === 'credential') {
-    Object.assign(row, {
-      label: v.label,
-      customer: O(v.customer),
-      host: v.host,
-      port: num(v.port) || 8000,
-      username: v.username,
-      password: v.password,
-      notes: v.notes || '—'
-    });
-    return;
-  }
-  if (entity === 'product') {
-    Object.assign(row, {
-      sku: v.sku,
-      name: v.name,
-      specs: v.specs,
-      category: v.category || row.category,
-      purchase_price: num(v.purchase_price),
-      sale_price: num(v.sale_price),
-      stock: num(v.stock),
-      reserved: num(v.reserved),
-      reorder_level: num(v.reorder_level),
-      track_serials: v.track_serials === 'Yes'
-    });
-    return;
-  }
-  if (entity === 'serial') {
-    Object.assign(row, {
-      serial_no: v.serial_no,
-      product: O(v.product),
-      status: v.status || row.status,
-      customer: v.customer ? O(v.customer) : null,
-      in_warranty: v.status === 'installed' ? true : !!row.in_warranty
-    });
-    return;
-  }
-  if (entity === 'po') {
-    const prev = row.status;
-    Object.assign(row, {
-      supplier: O(v.supplier),
-      eta: v.eta || row.eta,
-      total: num(v.total),
-      status: v.status || row.status
-    });
-    if (prev !== 'received' && row.status === 'received') receivePO(row);
-    return;
-  }
-  if (entity === 'repair') {
-    Object.assign(row, {
-      customer: O(v.customer),
-      device: v.device,
-      serial_no: v.serial_no,
-      issue: v.issue,
-      coverage: v.coverage || row.coverage,
-      technician: v.technician ? O(v.technician) : null,
-      promised_on: v.promised_on || row.promised_on,
-      charge: num(v.charge),
-      status: v.status || row.status
-    });
-    return;
-  }
-  if (entity === 'lead') {
-    Object.assign(row, {
-      name: v.name,
-      requirement: v.requirement,
-      value: num(v.value),
-      source: v.source || row.source,
-      segment: v.segment || row.segment,
-      owner: O(v.owner || teamNames()[0]),
-      stage: num(v.stage)
-    });
-    return;
-  }
-  if (entity === 'quote') {
-    Object.assign(row, {
-      customer: O(v.customer),
-      scope: v.scope,
-      total: num(v.total),
-      status: v.status || row.status,
-      owner: O(v.owner || teamNames()[0]),
-      valid_till: v.valid_till || row.valid_till
-    });
-    convertQuote(row);
-    return;
-  }
-  if (entity === 'invoice') {
-    Object.assign(row, {
-      customer: O(v.customer),
-      total: num(v.total),
-      paid: num(v.paid),
-      status: v.status || row.status,
-      issue_date: v.issue_date || row.issue_date,
-      due_date: v.due_date || row.due_date,
-      note: v.note || ''
-    });
-    row.balance = row.total - row.paid;
-    return;
+  try {
+    if (entity === 'job') {
+      Object.assign(row, {
+        customer: O(v.customer),
+        type: v.type || row.type,
+        scope: v.scope,
+        scheduled_on: v.scheduled_on || row.scheduled_on,
+        slot: v.slot || 'TBD',
+        technician: v.technician ? O(v.technician) : null,
+        status: v.status || row.status
+      });
+      return;
+    }
+    if (entity === 'ticket') {
+      Object.assign(row, {
+        customer: O(v.customer),
+        issue: v.issue,
+        priority: v.priority || row.priority,
+        coverage: v.coverage || row.coverage,
+        assignee: v.assignee ? O(v.assignee) : null,
+        status: v.status || row.status,
+        sla_state: v.sla_state || row.sla_state
+      });
+      return;
+    }
+    if (entity === 'amc') {
+      Object.assign(row, {
+        customer: O(v.customer),
+        plan: v.plan || row.plan,
+        devices: num(v.devices),
+        value: num(v.value),
+        visits_total: num(v.visits_total) || row.visits_total,
+        visits_used: num(v.visits_used),
+        starts_on: v.starts_on || row.starts_on,
+        ends_on: v.ends_on || row.ends_on,
+        status: v.status || row.status
+      });
+      return;
+    }
+    if (entity === 'equipment') {
+      Object.assign(row, {
+        name: v.name,
+        customer: O(v.customer),
+        product: O(v.name),
+        location: v.location,
+        serial: {
+          serial_no: v.serial_no || '—'
+        },
+        installed_on: v.installed_on || row.installed_on,
+        warranty_end: v.warranty_end || row.warranty_end,
+        in_warranty: v.warranty_end ? new Date(v.warranty_end).getTime() > Date.now() : row.in_warranty
+      });
+      return;
+    }
+    if (entity === 'credential') {
+      Object.assign(row, {
+        label: v.label,
+        customer: O(v.customer),
+        host: v.host,
+        port: num(v.port) || 8000,
+        username: v.username,
+        password: v.password,
+        notes: v.notes || '—'
+      });
+      return;
+    }
+    if (entity === 'product') {
+      Object.assign(row, {
+        sku: v.sku,
+        name: v.name,
+        specs: v.specs,
+        category: v.category || row.category,
+        purchase_price: num(v.purchase_price),
+        sale_price: num(v.sale_price),
+        stock: num(v.stock),
+        reserved: num(v.reserved),
+        reorder_level: num(v.reorder_level),
+        track_serials: v.track_serials === 'Yes'
+      });
+      return;
+    }
+    if (entity === 'serial') {
+      Object.assign(row, {
+        serial_no: v.serial_no,
+        product: O(v.product),
+        status: v.status || row.status,
+        customer: v.customer ? O(v.customer) : null,
+        in_warranty: v.status === 'installed' ? true : !!row.in_warranty
+      });
+      return;
+    }
+    if (entity === 'po') {
+      const prev = row.status;
+      Object.assign(row, {
+        supplier: O(v.supplier),
+        eta: v.eta || row.eta,
+        total: num(v.total),
+        status: v.status || row.status
+      });
+      if (prev !== 'received' && row.status === 'received') receivePO(row);
+      return;
+    }
+    if (entity === 'repair') {
+      Object.assign(row, {
+        customer: O(v.customer),
+        device: v.device,
+        serial_no: v.serial_no,
+        issue: v.issue,
+        coverage: v.coverage || row.coverage,
+        technician: v.technician ? O(v.technician) : null,
+        promised_on: v.promised_on || row.promised_on,
+        charge: num(v.charge),
+        status: v.status || row.status
+      });
+      return;
+    }
+    if (entity === 'lead') {
+      Object.assign(row, {
+        name: v.name,
+        requirement: v.requirement,
+        value: num(v.value),
+        source: v.source || row.source,
+        segment: v.segment || row.segment,
+        owner: O(v.owner || teamNames()[0]),
+        stage: num(v.stage)
+      });
+      return;
+    }
+    if (entity === 'quote') {
+      Object.assign(row, {
+        customer: O(v.customer),
+        scope: v.scope,
+        total: num(v.total),
+        status: v.status || row.status,
+        owner: O(v.owner || teamNames()[0]),
+        valid_till: v.valid_till || row.valid_till
+      });
+      if (Array.isArray(v.items)) row.items = normalizeQuoteItems(v.items);
+      if (v.status === 'accepted' && !row.converted) convertQuote(row);
+      return;
+    }
+    if (entity === 'invoice') {
+      const normItems = v.items ? normalizeQuoteItems(v.items) : row.items || [];
+      Object.assign(row, {
+        customer: O(v.customer),
+        total: num(v.total),
+        paid: num(v.paid),
+        status: v.status || row.status,
+        issue_date: v.issue_date || row.issue_date,
+        due_date: v.due_date || row.due_date,
+        note: v.note || '',
+        items: normItems
+      });
+      row.balance = row.total - row.paid;
+      return;
+    }
+  } finally {
+    afterMutation();
   }
 }
 function FormModal({
@@ -3578,7 +3806,8 @@ function FormModal({
   submitLabel = 'Save',
   initial,
   onClose,
-  onSave
+  onSave,
+  busy = false
 }) {
   const [form, setForm] = useState(() => {
     const o = {
@@ -3671,6 +3900,7 @@ function FormModal({
       flex: 1,
       justifyContent: 'center'
     },
+    disabled: busy,
     onClick: onClose
   }, "Cancel"), /*#__PURE__*/React.createElement("button", {
     className: "btn-p",
@@ -3678,8 +3908,9 @@ function FormModal({
       flex: 1,
       justifyContent: 'center'
     },
+    disabled: busy,
     onClick: () => onSave(form)
-  }, submitLabel))));
+  }, busy ? 'Saving…' : submitLabel))));
 }
 function CreateButton({
   entity,
@@ -3688,7 +3919,21 @@ function CreateButton({
   className
 }) {
   const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const cfg = ENTITIES[entity];
+  const handleSave = async v => {
+    const created = cfg.create(v);
+    if (created === false) return;
+    setBusy(true);
+    try {
+      const ok = await commitChange();
+      if (!ok) return;
+      setOpen(false);
+      onDone && onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
     className: className || 'btn-p',
     onClick: () => setOpen(true)
@@ -3700,12 +3945,11 @@ function CreateButton({
     title: 'New ' + cfg.label,
     fields: cfg.fields,
     submitLabel: 'Create ' + cfg.label,
-    onClose: () => setOpen(false),
-    onSave: v => {
-      cfg.create(v);
-      setOpen(false);
-      onDone && onDone();
-    }
+    busy: busy,
+    onClose: () => {
+      if (!busy) setOpen(false);
+    },
+    onSave: handleSave
   }));
 }
 function NotifPopover({
@@ -3878,6 +4122,7 @@ function Shell({
   const [results, setResults] = useState(null);
   const [q, setQ] = useState('');
   const [notif, setNotif] = useState(false);
+  const [saveState, setSaveState] = useState('saved');
   const cur = active ?? loc.pathname.replace('/', '');
   const go = id => {
     nav('/' + id);
@@ -3894,6 +4139,16 @@ function Shell({
     }, 200);
     return () => clearTimeout(t);
   }, [q]);
+  useEffect(() => {
+    const onStart = () => setSaveState('saving');
+    const onDone = e => setSaveState(e.detail?.ok === false ? 'error' : 'saved');
+    window.addEventListener('sv-persist-start', onStart);
+    window.addEventListener('sv-persist', onDone);
+    return () => {
+      window.removeEventListener('sv-persist-start', onStart);
+      window.removeEventListener('sv-persist', onDone);
+    };
+  }, []);
   return /*#__PURE__*/React.createElement("div", {
     className: "app"
   }, /*#__PURE__*/React.createElement("div", {
@@ -3998,7 +4253,15 @@ function Shell({
     style: {
       flex: 1
     }
-  }), /*#__PURE__*/React.createElement("div", {
+  }), saveState !== 'saved' && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 800,
+      marginRight: 10,
+      color: saveState === 'error' ? 'var(--red)' : 'var(--mut)'
+    },
+    title: "Database save status"
+  }, saveState === 'saving' ? 'Saving…' : 'Save failed — retry from Settings'), /*#__PURE__*/React.createElement("div", {
     style: {
       position: 'relative'
     }
@@ -4140,18 +4403,21 @@ function TablePage({
   const rows = Array.isArray(data) ? data : data?.data ?? [];
   const cfg = entity ? ENTITIES[entity] : null;
   const canMutate = !!(entity && ENTITY_STORE[entity]);
-  const doDelete = r => {
+  const doDelete = async r => {
     if (!canMutate) return;
     if (!confirm(`Delete this ${cfg?.label || 'record'}? This cannot be undone.`)) return;
     if (entityDelete(entity, r.id)) {
+      await afterMutation();
       setRec(null);
       reload();
     }
   };
-  const doSaveEdit = v => {
+  const doSaveEdit = async v => {
     if (!editRow || !canMutate) return;
     const row = DB[ENTITY_STORE[entity]]?.find(x => x.id === editRow.id);
-    if (row) entityApplyEdit(entity, row, v);
+    if (!row) return;
+    entityApplyEdit(entity, row, v);
+    await afterMutation();
     setEditRow(null);
     setRec(null);
     reload();
@@ -4546,6 +4812,70 @@ function PrintHost({
     doc: doc
   }))));
 }
+function lineUnitPrice(it) {
+  if (it.unit_price != null && it.unit_price !== '') return num(it.unit_price);
+  const q = Math.max(1, num(it.qty) || 1);
+  const a = num(it.amount);
+  return q > 0 && a ? a / q : 0;
+}
+function lineTotalFromItem(it) {
+  const q = Math.max(1, num(it.qty) || 1);
+  return lineUnitPrice(it) * q;
+}
+function mapBuilderLine(i) {
+  const qty = num(i.qty) || 1;
+  const amount = num(i.amount);
+  const unit_price = i.unit_price != null && i.unit_price !== '' ? num(i.unit_price) : amount && qty ? amount / qty : '';
+  const lineAmount = unit_price ? unit_price * qty : amount;
+  return {
+    description: i.description,
+    amount: lineAmount || amount || '',
+    qty,
+    product_id: i.product_id || '',
+    unit_price: unit_price || ''
+  };
+}
+function applyBuilderItemChange(it, k, v) {
+  const next = {
+    ...it,
+    [k]: v
+  };
+  let qty = Math.max(1, num(k === 'qty' ? v : next.qty) || 1);
+  next.qty = qty;
+  if (k === 'amount') {
+    const a = num(v);
+    next.amount = a;
+    next.unit_price = qty > 0 ? a / qty : '';
+    return next;
+  }
+  let unit = next.unit_price != null && next.unit_price !== '' ? num(next.unit_price) : lineUnitPrice(next);
+  if (k === 'unit_price') unit = num(v);
+  if (unit > 0) {
+    next.unit_price = unit;
+    next.amount = unit * qty;
+  }
+  return next;
+}
+function catalogQuoteItems(plan, group) {
+  const headDesc = plan.brand + ' ' + group + (group === 'AMC Plan' ? ' — annual contract' : ' — complete package');
+  const main = {
+    description: headDesc,
+    amount: plan.price,
+    qty: 1,
+    product_id: ''
+  };
+  const headProd = findProductForLine(headDesc);
+  if (headProd) main.product_id = headProd.id;
+  return [main].concat((plan.items || []).map(d => {
+    const prod = findProductForLine(String(d));
+    return {
+      description: d,
+      amount: 0,
+      qty: 1,
+      product_id: prod ? prod.id : ''
+    };
+  }));
+}
 function QuoteBuilder({
   title,
   initial,
@@ -4555,24 +4885,44 @@ function QuoteBuilder({
 }) {
   const [customer, setCustomer] = useState(initial?.customer || '');
   const [scope, setScope] = useState(initial?.scope || '');
-  const [items, setItems] = useState(initial?.items?.length ? initial.items.map(i => ({
-    description: i.description,
-    amount: i.amount || ''
-  })) : [{
+  const [items, setItems] = useState(initial?.items?.length ? initial.items.map(mapBuilderLine) : [{
     description: '',
-    amount: ''
+    amount: '',
+    qty: 1,
+    product_id: '',
+    unit_price: ''
   }]);
   const [status, setStatus] = useState(initial?.status || 'draft');
-  const [owner, setOwner] = useState(initial?.owner || 'Rohit Sharma');
+  const [owner, setOwner] = useState(initial?.owner || teamNames()[0] || 'Owner');
   const [err, setErr] = useState('');
   const total = items.reduce((a, i) => a + (Number(i.amount) || 0), 0);
-  const setItem = (idx, k, v) => setItems(s => s.map((it, i) => i === idx ? {
-    ...it,
-    [k]: v
-  } : it));
+  const setItem = (idx, k, v) => setItems(s => s.map((it, i) => i === idx ? applyBuilderItemChange(it, k, v) : it));
+  const pickProduct = (idx, productId) => {
+    const p = productId ? DB.products.find(x => x.id === +productId) : null;
+    setItems(s => s.map((it, i) => {
+      if (i !== idx) return it;
+      const qty = Math.max(1, num(it.qty) || 1);
+      if (!p) return {
+        ...it,
+        product_id: '',
+        unit_price: ''
+      };
+      const unit = num(p.sale_price);
+      return {
+        ...it,
+        product_id: p.id,
+        description: p.name,
+        unit_price: unit,
+        amount: unit * qty
+      };
+    }));
+  };
   const addLine = () => setItems(s => [...s, {
     description: '',
-    amount: ''
+    amount: '',
+    qty: 1,
+    product_id: '',
+    unit_price: ''
   }]);
   const removeLine = idx => setItems(s => s.length > 1 ? s.filter((_, i) => i !== idx) : s);
   return /*#__PURE__*/React.createElement("div", {
@@ -4653,12 +5003,27 @@ function QuoteBuilder({
     style: {
       display: 'flex',
       gap: 7,
-      alignItems: 'center'
+      alignItems: 'center',
+      flexWrap: 'wrap'
     }
-  }, /*#__PURE__*/React.createElement("input", {
+  }, /*#__PURE__*/React.createElement("select", {
     className: "inp",
     style: {
-      flex: 1
+      width: 150,
+      flex: 'none'
+    },
+    value: it.product_id || '',
+    onChange: e => pickProduct(idx, e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Inventory…"), DB.products.map(p => /*#__PURE__*/React.createElement("option", {
+    key: p.id,
+    value: p.id
+  }, p.name))), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    style: {
+      flex: 1,
+      minWidth: 120
     },
     placeholder: "Description",
     value: it.description,
@@ -4666,10 +5031,24 @@ function QuoteBuilder({
   }), /*#__PURE__*/React.createElement("input", {
     className: "inp",
     style: {
-      width: 120
+      width: 56,
+      flex: 'none'
     },
     type: "number",
-    placeholder: "Amount ₹",
+    min: 1,
+    title: "Qty",
+    placeholder: "Qty",
+    value: it.qty,
+    onChange: e => setItem(idx, 'qty', e.target.value)
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    style: {
+      width: 110,
+      flex: 'none'
+    },
+    type: "number",
+    placeholder: "Line ₹",
+    title: "Line total (qty × unit)",
     value: it.amount,
     onChange: e => setItem(idx, 'amount', e.target.value)
   }), /*#__PURE__*/React.createElement("button", {
@@ -4776,8 +5155,8 @@ function QuoteBuilder({
         setErr('Please select a customer.');
         return;
       }
-      if (!items.some(i => i.description.trim())) {
-        setErr('Add at least one line item.');
+      if (!items.some(i => String(i.description || '').trim())) {
+        setErr('Add at least one line item with a description.');
         return;
       }
       onSave({
@@ -4789,6 +5168,275 @@ function QuoteBuilder({
       });
     }
   }, editing ? 'Save Changes' : 'Create Quotation'))));
+}
+function InvoiceBuilder({
+  title,
+  initial,
+  editing,
+  onClose,
+  onSave
+}) {
+  const [customer, setCustomer] = useState(initial?.customer || '');
+  const [items, setItems] = useState(initial?.items?.length ? initial.items.map(mapBuilderLine) : [{
+    description: '',
+    amount: '',
+    qty: 1,
+    product_id: '',
+    unit_price: ''
+  }]);
+  const [dueDays, setDueDays] = useState(initial?.dueDays ?? 15);
+  const [note, setNote] = useState(initial?.note || '');
+  const [err, setErr] = useState('');
+  const total = items.reduce((a, i) => a + (Number(i.amount) || 0), 0);
+  const setItem = (idx, k, v) => setItems(s => s.map((it, i) => i === idx ? applyBuilderItemChange(it, k, v) : it));
+  const pickProduct = (idx, productId) => {
+    const p = productId ? DB.products.find(x => x.id === +productId) : null;
+    setItems(s => s.map((it, i) => {
+      if (i !== idx) return it;
+      const qty = Math.max(1, num(it.qty) || 1);
+      if (!p) return {
+        ...it,
+        product_id: '',
+        unit_price: ''
+      };
+      const unit = num(p.sale_price);
+      return {
+        ...it,
+        product_id: p.id,
+        description: p.name,
+        unit_price: unit,
+        amount: unit * qty
+      };
+    }));
+  };
+  const addLine = () => setItems(s => [...s, {
+    description: '',
+    amount: '',
+    qty: 1,
+    product_id: '',
+    unit_price: ''
+  }]);
+  const removeLine = idx => setItems(s => s.length > 1 ? s.filter((_, i) => i !== idx) : s);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "scrim show",
+    style: {
+      zIndex: 60
+    },
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      position: 'fixed',
+      top: '50%',
+      left: '50%',
+      transform: 'translate(-50%,-50%)',
+      width: 540,
+      maxWidth: '94vw',
+      maxHeight: '90vh',
+      overflowY: 'auto',
+      background: 'var(--card)',
+      border: '1px solid var(--ln)',
+      borderRadius: 16,
+      padding: '22px 22px 18px',
+      boxShadow: '0 20px 60px rgba(40,35,20,.22)',
+      zIndex: 61
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      letterSpacing: '-.01em',
+      marginBottom: 8
+    }
+  }, title), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-l"
+  }, "Customer"), /*#__PURE__*/React.createElement("select", {
+    className: "inp",
+    value: customer,
+    onChange: e => setCustomer(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Select…"), custNames().map(n => /*#__PURE__*/React.createElement("option", {
+    key: n,
+    value: n
+  }, n)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 120
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field-l"
+  }, "Due in (days)"), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    type: "number",
+    min: 1,
+    value: dueDays,
+    onChange: e => setDueDays(e.target.value)
+  }))), /*#__PURE__*/React.createElement("label", {
+    className: "field-l",
+    style: {
+      marginBottom: 8
+    }
+  }, "Line items"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 7
+    }
+  }, items.map((it, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    style: {
+      display: 'flex',
+      gap: 7,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "inp",
+    style: {
+      width: 150,
+      flex: 'none'
+    },
+    value: it.product_id || '',
+    onChange: e => pickProduct(idx, e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Inventory…"), DB.products.map(p => /*#__PURE__*/React.createElement("option", {
+    key: p.id,
+    value: p.id
+  }, p.name))), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    style: {
+      flex: 1,
+      minWidth: 120
+    },
+    placeholder: "Description",
+    value: it.description,
+    onChange: e => setItem(idx, 'description', e.target.value)
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    style: {
+      width: 56,
+      flex: 'none'
+    },
+    type: "number",
+    min: 1,
+    title: "Qty",
+    placeholder: "Qty",
+    value: it.qty,
+    onChange: e => setItem(idx, 'qty', e.target.value)
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    style: {
+      width: 110,
+      flex: 'none'
+    },
+    type: "number",
+    placeholder: "Line ₹",
+    title: "Line total (qty × unit)",
+    value: it.amount,
+    onChange: e => setItem(idx, 'amount', e.target.value)
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "act",
+    title: "Remove",
+    style: {
+      flex: 'none',
+      fontSize: 18,
+      lineHeight: 1
+    },
+    onClick: () => removeLine(idx)
+  }, "×")))), /*#__PURE__*/React.createElement("button", {
+    className: "btn-g",
+    style: {
+      marginTop: 8,
+      paddingLeft: 0
+    },
+    onClick: addLine
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "plus",
+    s: 13,
+    sw: 2.4
+  }), "Add line"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      borderTop: '1px solid var(--ln)',
+      marginTop: 10,
+      paddingTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: 'var(--mut)',
+      fontWeight: 700
+    }
+  }, "Total (incl. GST)"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 19,
+      fontWeight: 800
+    }
+  }, inr(total))), /*#__PURE__*/React.createElement("label", {
+    className: "field-l"
+  }, "Note"), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    value: note,
+    placeholder: "Optional note",
+    onChange: e => setNote(e.target.value)
+  }), err && /*#__PURE__*/React.createElement("div", {
+    className: "err",
+    style: {
+      color: 'var(--red)',
+      fontSize: 12,
+      fontWeight: 700,
+      marginTop: 10
+    }
+  }, err), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 9,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-o",
+    style: {
+      flex: 1,
+      justifyContent: 'center'
+    },
+    onClick: onClose
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-p",
+    style: {
+      flex: 1,
+      justifyContent: 'center'
+    },
+    onClick: () => {
+      if (!customer) {
+        setErr('Please select a customer.');
+        return;
+      }
+      if (!items.some(i => String(i.description || '').trim())) {
+        setErr('Add at least one line item with a description.');
+        return;
+      }
+      onSave({
+        customer,
+        items,
+        dueDays: num(dueDays) || 15,
+        note,
+        total,
+        editing
+      });
+    }
+  }, editing ? 'Save Changes' : 'Create Invoice'))));
 }
 const Q_TONE = {
   draft: 'gray',
@@ -5069,6 +5717,7 @@ function Leads() {
   const [rec, setRec] = useState(null);
   const advance = async id => {
     await api.post(`/leads/${id}/advance`);
+    await afterMutation();
     reload();
     setRec(null);
   };
@@ -5176,7 +5825,7 @@ function Quotes() {
   const [builder, setBuilder] = useState(null);
   const [planEdit, setPlanEdit] = useState(null);
   const [, force] = useState(0);
-  const savePlan = v => {
+  const savePlan = async v => {
     const price = num(v.price);
     const items = v.items.map(s => s.trim()).filter(Boolean);
     if (!v.brand.trim()) return;
@@ -5194,16 +5843,12 @@ function Quotes() {
         items
       });
     }
-    saveCatalog();
+    await saveCatalog();
     setPlanEdit(null);
     force(n => n + 1);
   };
-  const saveQuote = q => {
-    const items = q.items.filter(i => i.description).map((i, idx) => ({
-      id: idx + 1,
-      description: i.description,
-      amount: num(i.amount)
-    }));
+  const saveQuote = async q => {
+    const items = normalizeQuoteItems(q.items);
     const total = items.reduce((a, i) => a + i.amount, 0);
     if (builder?.editing) {
       const ex = DB.quotes.find(x => x.id === builder.editing);
@@ -5216,7 +5861,7 @@ function Quotes() {
           owner: O(q.owner),
           items
         });
-        convertQuote(ex);
+        if (ex.status === 'accepted' && !ex.converted) convertQuote(ex);
       }
     } else {
       const nq = {
@@ -5231,10 +5876,12 @@ function Quotes() {
         items
       };
       DB.quotes.push(nq);
-      convertQuote(nq);
+      if (nq.status === 'accepted') convertQuote(nq);
     }
+    await commitChange();
     setBuilder(null);
     setRec(null);
+    setFilter(null);
     reload();
   };
   const waQuote = r => {
@@ -5254,17 +5901,23 @@ function Quotes() {
       rows: [['Status', /*#__PURE__*/React.createElement(Pill, {
         t: Q_TONE[r.status],
         dot: true
-      }, r.status)], ['Valid till', date(r.valid_till)], ['Owner', r.owner?.name || '—'], ['Scope', r.scope || '—'], ['Total', inr(r.total)], ...(r.converted ? [['Invoice', r.invoice_number || '—'], ['Install job', r.job_number || '—']] : [])]
-    })), r.items?.length > 0 && /*#__PURE__*/React.createElement(DwSection, {
+      }, r.status)], ['Valid till', date(r.valid_till)], ['Owner', r.owner?.name || '—'], ['Scope', r.scope || '—'], ['Total', inr(r.total)], ...(r.converted ? [['Invoice', r.invoice_number || '—'], ['Install job', r.job_number || '—']] : []), ...(r.stock_note ? [['Stock', r.stock_note]] : [])]
+    })), /*#__PURE__*/React.createElement(DwSection, {
       label: "Line items"
-    }, /*#__PURE__*/React.createElement("div", {
+    }, !r.items || !r.items.length ? /*#__PURE__*/React.createElement("div", {
+      className: "empty",
+      style: {
+        padding: 14,
+        fontSize: 12
+      }
+    }, "No line items yet — tap Edit to add products and amounts.") : /*#__PURE__*/React.createElement("div", {
       className: "dwbox"
     }, r.items.map(it => /*#__PURE__*/React.createElement("div", {
       className: "li",
       key: it.id
     }, /*#__PURE__*/React.createElement("div", {
       className: "lin"
-    }, it.description), /*#__PURE__*/React.createElement("span", {
+    }, it.description, it.qty > 1 ? ` × ${it.qty}` : ''), /*#__PURE__*/React.createElement("span", {
       className: "lip"
     }, it.amount > 0 ? inr(it.amount) : 'incl.')))))),
     foot: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
@@ -5288,9 +5941,10 @@ function Quotes() {
       style: {
         color: 'var(--red)'
       },
-      onClick: () => {
+      onClick: async () => {
         if (confirm(`Delete quotation ${r.number}?`)) {
           entityDelete('quote', r.id);
+          await afterMutation();
           setRec(null);
           reload();
         }
@@ -5318,7 +5972,8 @@ function Quotes() {
     className: "btn-p",
     onClick: () => setBuilder({
       title: 'New Quotation',
-      initial: {}
+      initial: {},
+      key: 'new-' + Date.now()
     })
   }, /*#__PURE__*/React.createElement(Ic, {
     n: "plus",
@@ -5418,13 +6073,7 @@ function Quotes() {
         title: 'Quote · ' + p.brand + ' ' + p.group,
         initial: {
           scope: p.brand + ' ' + p.group,
-          items: [{
-            description: p.brand + ' ' + p.group + (g === 'AMC Plan' ? ' — annual contract' : ' — complete package'),
-            amount: p.price
-          }].concat(p.items.map(d => ({
-            description: d,
-            amount: 0
-          })))
+          items: catalogQuoteItems(p, g)
         }
       });
     }
@@ -5454,12 +6103,12 @@ function Quotes() {
     style: {
       color: 'var(--red)'
     },
-    onClick: e => {
+    onClick: async e => {
       e.stopPropagation();
       if (confirm(`Delete the ${p.brand} ${p.group} plan?`)) {
         const i = CATALOG.findIndex(x => x.id === p.id);
         if (i >= 0) CATALOG.splice(i, 1);
-        saveCatalog();
+        await saveCatalog();
         force(n => n + 1);
       }
     }
@@ -5508,7 +6157,7 @@ function Quotes() {
     rec: rec,
     onClose: () => setRec(null)
   }), builder && /*#__PURE__*/React.createElement(QuoteBuilder, {
-    key: builder.title,
+    key: builder.key || builder.title,
     title: builder.title,
     initial: builder.initial,
     editing: builder.editing,
@@ -5547,7 +6196,7 @@ function Invoices() {
   const rows = data?.data ?? [];
   const [payFor, setPayFor] = useState(null);
   const [printDoc, setPrintDoc] = useState(null);
-  const [editRow, setEditRow] = useState(null);
+  const [invoiceBuilder, setInvoiceBuilder] = useState(null);
   const whatsapp = r => {
     const message = `Hello ${r.customer?.name || ''},\n\nGentle reminder for invoice ${r.number}.\nTotal: ${inr(r.total)} · Received: ${inr(r.paid)} · Balance due: ${inr(r.balance)} (due ${date(r.due_date)}).\n\nRegards,\n${COMPANY.name}\n${COMPANY.phone}`;
     waOpen(r.customer?.name, message, {
@@ -5555,7 +6204,7 @@ function Invoices() {
       doc: r
     });
   };
-  const recordPayment = vals => {
+  const recordPayment = async vals => {
     const inv = DB.invoices.find(x => x.id === payFor.id);
     if (inv) {
       const amt = Math.min(num(inv.total) - num(inv.paid), Number(vals.amount) || 0);
@@ -5570,7 +6219,42 @@ function Invoices() {
       inv.balance = inv.total - inv.paid;
       inv.status = inv.balance <= 0 ? 'paid' : inv.paid > 0 ? 'partial' : inv.status;
     }
+    await commitChange();
     setPayFor(null);
+    reload();
+    reloadStats();
+  };
+  const saveInvoice = async v => {
+    const items = normalizeQuoteItems(v.items);
+    const total = items.reduce((a, i) => a + i.amount, 0) || num(v.total);
+    if (v.editing) {
+      const row = DB.invoices.find(x => x.id === v.editing);
+      if (row) {
+        entityApplyEdit('invoice', row, {
+          customer: v.customer,
+          total,
+          paid: row.paid,
+          status: row.status,
+          issue_date: row.issue_date,
+          due_date: row.due_date,
+          note: v.note,
+          items
+        });
+      }
+    } else {
+      const inv = createInvoice({
+        customer: v.customer,
+        total,
+        items,
+        dueDays: v.dueDays,
+        note: v.note,
+        persist: false
+      });
+      if (!inv) return;
+    }
+    await commitChange();
+    setInvoiceBuilder(null);
+    setRec(null);
     reload();
     reloadStats();
   };
@@ -5578,17 +6262,43 @@ function Invoices() {
     title: r.number,
     subtitle: r.customer?.name,
     icon: 'file',
-    body: /*#__PURE__*/React.createElement(DwSection, {
+    body: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(DwSection, {
       label: "Invoice"
     }, /*#__PURE__*/React.createElement(DwBox, {
       rows: [['Status', /*#__PURE__*/React.createElement(Pill, {
         t: INV_TONE[r.status],
         dot: true
-      }, r.status)], ['Issued', date(r.issue_date)], ['Due', date(r.due_date)], ['Total', inr(r.total)], ['Received', inr(r.paid)], ['Balance', inr(r.balance)]]
-    })),
+      }, r.status)], ['Issued', date(r.issue_date)], ['Due', date(r.due_date)], ['Total', inr(r.total)], ['Received', inr(r.paid)], ['Balance', inr(r.balance)], ...(r.stock_note ? [['Stock', r.stock_note]] : [])]
+    })), /*#__PURE__*/React.createElement(DwSection, {
+      label: "Line items"
+    }, !r.items || !r.items.length ? /*#__PURE__*/React.createElement("div", {
+      className: "empty",
+      style: {
+        padding: 14,
+        fontSize: 12
+      }
+    }, "No line items — tap Edit to add products and amounts.") : /*#__PURE__*/React.createElement("div", {
+      className: "dwbox"
+    }, r.items.map(it => /*#__PURE__*/React.createElement("div", {
+      className: "li",
+      key: it.id
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "lin"
+    }, it.description, it.qty > 1 ? ` × ${it.qty}` : ''), /*#__PURE__*/React.createElement("span", {
+      className: "lip"
+    }, it.amount > 0 ? inr(it.amount) : 'incl.')))))),
     foot: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
       className: "btn-o",
-      onClick: () => setEditRow(r)
+      onClick: () => setInvoiceBuilder({
+        title: 'Edit ' + r.number,
+        editing: r.id,
+        initial: {
+          customer: r.customer?.name,
+          items: r.items,
+          note: r.note || '',
+          dueDays: Math.max(1, Math.round((new Date(r.due_date).getTime() - new Date(r.issue_date).getTime()) / 864e5))
+        }
+      })
     }, /*#__PURE__*/React.createElement(Ic, {
       n: "sliders",
       s: 14
@@ -5597,9 +6307,10 @@ function Invoices() {
       style: {
         color: 'var(--red)'
       },
-      onClick: () => {
+      onClick: async () => {
         if (confirm(`Delete invoice ${r.number}?`)) {
           entityDelete('invoice', r.id);
+          await afterMutation();
           setRec(null);
           reload();
           reloadStats();
@@ -5633,13 +6344,18 @@ function Invoices() {
     active: "invoices"
   }, /*#__PURE__*/React.createElement(PageHead, {
     title: "Billing & Invoices"
-  }, /*#__PURE__*/React.createElement(CreateButton, {
-    entity: "invoice",
-    onDone: () => {
-      reload();
-      reloadStats();
-    }
-  })), stats && /*#__PURE__*/React.createElement(StatRow, null, /*#__PURE__*/React.createElement(Stat, {
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-p",
+    onClick: () => setInvoiceBuilder({
+      title: 'New Invoice',
+      initial: {},
+      key: 'new-' + Date.now()
+    })
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "plus",
+    s: 14,
+    sw: 2.2
+  }), "New Invoice")), stats && /*#__PURE__*/React.createElement(StatRow, null, /*#__PURE__*/React.createElement(Stat, {
     n: "BILLED",
     v: lakh(stats.billed),
     s: "total"
@@ -5707,20 +6423,16 @@ function Invoices() {
     }],
     onClose: () => setPayFor(null),
     onSave: recordPayment
-  }), editRow && /*#__PURE__*/React.createElement(FormModal, {
-    title: 'Edit ' + editRow.number,
-    submitLabel: "Save Changes",
-    fields: entityEditFields('invoice'),
-    initial: entityToInitial('invoice', editRow),
-    onClose: () => setEditRow(null),
-    onSave: v => {
-      const row = DB.invoices.find(x => x.id === editRow.id);
-      if (row) entityApplyEdit('invoice', row, v);
-      setEditRow(null);
-      setRec(null);
-      reload();
-      reloadStats();
-    }
+  }), invoiceBuilder && /*#__PURE__*/React.createElement(InvoiceBuilder, {
+    key: invoiceBuilder.key || invoiceBuilder.title,
+    title: invoiceBuilder.title,
+    initial: invoiceBuilder.initial,
+    editing: invoiceBuilder.editing,
+    onClose: () => setInvoiceBuilder(null),
+    onSave: v => saveInvoice({
+      ...v,
+      editing: invoiceBuilder.editing
+    })
   }), printDoc && /*#__PURE__*/React.createElement(PrintHost, {
     kind: "invoice",
     doc: printDoc,
@@ -5882,7 +6594,7 @@ function Customers() {
   const [rec, setRec] = useState(null);
   const [tab, setTab] = useState('timeline');
   const [editCust, setEditCust] = useState(null);
-  const saveCustomer = v => {
+  const saveCustomer = async v => {
     const c = DB.customers.find(x => x.id === editCust.id);
     if (!c) {
       setEditCust(null);
@@ -5894,7 +6606,7 @@ function Customers() {
       alert(`Another customer named "${newName}" already exists.`);
       return;
     }
-    if (newName !== c.name) cascadeCustomerRename(c.name, newName); // v5: rename flows to every module
+    if (newName !== c.name) cascadeCustomerRename(c.name, newName);
     Object.assign(c, {
       name: newName,
       area: v.area,
@@ -5904,11 +6616,12 @@ function Customers() {
       sites: num(v.sites) || 1,
       owner: O(v.owner || c.owner?.name || teamNames()[0])
     });
+    await commitChange();
     setEditCust(null);
     setRec(null);
     reload();
   };
-  const deleteCustomer = r => {
+  const deleteCustomer = async r => {
     const links = customerLinkCount(r.name);
     const creds = DB.credentials.filter(c => c.customer?.name === r.name).length;
     if (links > 0) {
@@ -5918,10 +6631,11 @@ function Customers() {
     } else if (!confirm(`Delete customer "${r.name}"?${creds ? ` ${creds} saved credential(s) will also be removed.` : ''}`)) return;else cascadeCustomerDelete(r.name);
     const i = DB.customers.findIndex(x => x.id === r.id);
     if (i >= 0) DB.customers.splice(i, 1);
+    await commitChange();
     setRec(null);
     reload();
   };
-  const grantFreeAmc = name => {
+  const grantFreeAmc = async name => {
     if (DB.amc.some(a => a.customer?.name === name && a.status !== 'expired')) {
       if (!confirm('This customer already has an active AMC. Add a complimentary one anyway?')) return;
     }
@@ -5938,6 +6652,7 @@ function Customers() {
       visits_used: 0,
       status: 'active'
     });
+    await commitChange();
     reload();
     openCustomer(findCust(name), true);
   };
@@ -6405,7 +7120,7 @@ function Tickets() {
   const [rec, setRec] = useState(null);
   const [editRow, setEditRow] = useState(null);
   const rows = data?.data ?? [];
-  const setTicketStatus = (r, status) => {
+  const setTicketStatus = async (r, status) => {
     const t = DB.tickets.find(x => x.id === r.id);
     if (!t) return;
     t.status = status;
@@ -6431,6 +7146,7 @@ function Tickets() {
         }
       }
     }
+    await commitChange();
     reload();
     setRec(null);
   };
@@ -6491,9 +7207,10 @@ function Tickets() {
       style: {
         color: 'var(--red)'
       },
-      onClick: () => {
+      onClick: async () => {
         if (confirm('Delete this ticket?')) {
           entityDelete('ticket', r.id);
+          await afterMutation();
           setRec(null);
           reload();
         }
@@ -6601,9 +7318,10 @@ function Tickets() {
     fields: entityEditFields('ticket'),
     initial: entityToInitial('ticket', editRow),
     onClose: () => setEditRow(null),
-    onSave: v => {
+    onSave: async v => {
       const row = DB.tickets.find(x => x.id === editRow.id);
       if (row) entityApplyEdit('ticket', row, v);
+      await afterMutation();
       setEditRow(null);
       setRec(null);
       reload();
@@ -6667,9 +7385,10 @@ function Amc() {
       style: {
         color: 'var(--red)'
       },
-      onClick: () => {
+      onClick: async () => {
         if (confirm('Delete this AMC contract?')) {
           entityDelete('amc', r.id);
+          await afterMutation();
           setRec(null);
           reload();
         }
@@ -6744,9 +7463,10 @@ function Amc() {
     fields: entityEditFields('amc'),
     initial: entityToInitial('amc', editRow),
     onClose: () => setEditRow(null),
-    onSave: v => {
+    onSave: async v => {
       const row = DB.amc.find(x => x.id === editRow.id);
       if (row) entityApplyEdit('amc', row, v);
+      await afterMutation();
       setEditRow(null);
       setRec(null);
       reload();
@@ -6866,13 +7586,14 @@ function statusOf(p) {
   return ['In stock', 'green'];
 }
 function Inventory() {
-  const adjust = (r, done) => {
+  const adjust = async (r, done) => {
     const v = prompt(`Adjust stock for ${r.name}\nCurrent: ${r.stock}\nEnter change (e.g. 10 = stock in, -3 = stock out):`, '');
     if (v === null) return;
     const d = parseInt(v, 10);
     if (isNaN(d) || d === 0) return;
     const p = DB.products.find(x => x.id === r.id);
     if (p) p.stock = Math.max(0, num(p.stock) + d);
+    await commitChange();
     done();
   };
   return /*#__PURE__*/React.createElement(TablePage, {
@@ -7311,7 +8032,7 @@ function Team() {
   const [, force] = useState(0);
   const refresh = () => force(n => n + 1);
   const [edit, setEdit] = useState(null); // {id?} or 'new'
-  const save = v => {
+  const save = async v => {
     if (!v.name?.trim()) return;
     const nm = v.name.trim();
     const loginU = (v.login_username || '').trim();
@@ -7365,11 +8086,11 @@ function Team() {
         });
       }
     }
-    persistState();
+    await commitChange();
     setEdit(null);
     refresh();
   };
-  const remove = t => {
+  const remove = async t => {
     if (TEAM.length <= 1) {
       alert('At least one team member is required.');
       return;
@@ -7378,6 +8099,7 @@ function Team() {
     cascadeTeamRemove(t.name); // v5: no dangling references
     const i = TEAM.findIndex(x => x.id === t.id);
     if (i >= 0) TEAM.splice(i, 1);
+    await commitChange();
     refresh();
   };
   return /*#__PURE__*/React.createElement(Shell, {
@@ -7514,16 +8236,17 @@ function CompanyEditor() {
     };
     r.readAsDataURL(file);
   };
-  const apply = () => {
-    saveCompany(f);
+  const apply = async () => {
+    await saveCompany(f);
     setSaved(true);
   };
-  const reset = () => {
+  const reset = async () => {
     localStorage.removeItem('sv_company');
     Object.assign(COMPANY, COMPANY_DEFAULT);
     setF({
       ...COMPANY_DEFAULT
     });
+    await commitChange();
     setSaved(true);
   };
   const txt = [['name', 'Business name'], ['gstin', 'GSTIN'], ['phone', 'Phone'], ['email', 'Email'], ['web', 'Website'], ['address', 'Address']];
@@ -7651,6 +8374,7 @@ function Settings() {
   const fileRef = useRef();
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
+  const [saveState, setSaveState] = useState('saved');
   const [drive, setDrive] = useState({
     configured: false,
     connected: false,
@@ -7671,16 +8395,35 @@ function Settings() {
   useEffect(() => {
     refreshDrive();
   }, []);
+  useEffect(() => {
+    const onStart = () => setSaveState('saving');
+    const onDone = e => setSaveState(e.detail?.ok === false ? 'error' : 'saved');
+    window.addEventListener('sv-persist-start', onStart);
+    window.addEventListener('sv-persist', onDone);
+    return () => {
+      window.removeEventListener('sv-persist-start', onStart);
+      window.removeEventListener('sv-persist', onDone);
+    };
+  }, []);
   const getCsvForBackup = async () => {
     await flushToServer();
     let csvText = buildBackupCsvText();
     const memRows = countCsvRecords(csvText);
+    let localSavedAt = 0;
+    try {
+      const raw = localStorage.getItem(PERSIST_KEY);
+      if (raw) localSavedAt = Number(JSON.parse(raw).savedAt) || 0;
+    } catch (e) {/* ignore */}
     if (serverOK) {
       try {
         const res = await fetch(new URL('/backup/export', window.location.href).href + '?t=' + Date.now());
         if (res.ok) {
           const serverCsv = await res.text();
-          if (countCsvRecords(serverCsv) > memRows) csvText = serverCsv;
+          const serverRows = countCsvRecords(serverCsv);
+          const serverAtMatch = serverCsv.match(/^#\s*savedAt=(\d+)/m);
+          const serverAt = serverAtMatch ? Number(serverAtMatch[1]) : 0;
+          const memoryIsNewer = localSavedAt > serverAt || localSavedAt === serverAt && memRows >= serverRows;
+          if (!memoryIsNewer && serverRows > memRows) csvText = serverCsv;
         }
       } catch (e) {/* keep in-memory */}
     }
@@ -7853,7 +8596,7 @@ function Settings() {
     active: "settings"
   }, /*#__PURE__*/React.createElement(PageHead, {
     title: "Settings",
-    sub: "Workspace · Smart Vision Enterprise, Borsad"
+    sub: `Workspace · Smart Vision Enterprise, Borsad · Data: ${saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Save failed — retry from Backup' : 'Saved to disk'}`
   }), /*#__PURE__*/React.createElement(CompanyEditor, null), /*#__PURE__*/React.createElement("div", {
     className: "panel"
   }, /*#__PURE__*/React.createElement("div", {
@@ -8100,13 +8843,12 @@ function ServiceRepair() {
       doc
     } : undefined);
   };
-  const advance = r => {
+  const advance = async r => {
     const order = ['received', 'diagnosing', 'repairing', 'ready', 'delivered'];
     const t = DB.repairs.find(x => x.id === r.id);
     if (t) {
       const i = order.indexOf(t.status);
       if (i < order.length - 1) t.status = order[i + 1];
-      // v5: delivered + chargeable (paid coverage) → bill it into Invoices once
       if (t.status === 'delivered' && t.coverage === 'paid' && num(t.charge) > 0 && !t.invoice_number) {
         const inv = createInvoice({
           customer: t.customer.name,
@@ -8122,6 +8864,7 @@ function ServiceRepair() {
         t.invoice_number = inv.number;
       }
     }
+    await commitChange();
     reload();
     setRec(null);
   };
@@ -8195,9 +8938,10 @@ function ServiceRepair() {
       style: {
         color: 'var(--red)'
       },
-      onClick: () => {
+      onClick: async () => {
         if (confirm('Delete this repair job?')) {
           entityDelete('repair', r.id);
+          await afterMutation();
           setRec(null);
           reload();
         }
@@ -8275,9 +9019,10 @@ function ServiceRepair() {
     fields: entityEditFields('repair'),
     initial: entityToInitial('repair', editRow),
     onClose: () => setEditRow(null),
-    onSave: v => {
+    onSave: async v => {
       const row = DB.repairs.find(x => x.id === editRow.id);
       if (row) entityApplyEdit('repair', row, v);
+      await afterMutation();
       setEditRow(null);
       setRec(null);
       reload();

@@ -171,7 +171,11 @@ function decodeTextList(s) {
 
 function encodeAmountItems(items) {
   if (!Array.isArray(items) || !items.length) return '';
-  return items.map((it) => `${it.description || ''}|${it.amount ?? 0}`).join(';');
+  return items.map((it) => {
+    const qty = it.qty != null && it.qty !== '' ? it.qty : 1;
+    const pid = it.product_id != null && it.product_id !== '' ? it.product_id : '';
+    return `${String(it.description || '').replace(/\|/g, '/')}|${it.amount ?? 0}|${qty}|${pid}`;
+  }).join(';');
 }
 
 function decodeAmountItems(s) {
@@ -179,9 +183,19 @@ function decodeAmountItems(s) {
   return String(s).split(';').map((part, i) => {
     const p = part.trim();
     if (!p) return null;
-    const bar = p.lastIndexOf('|');
-    if (bar < 0) return { id: i + 1, description: p, amount: 0 };
-    return { id: i + 1, description: p.slice(0, bar).trim(), amount: Number(p.slice(bar + 1)) || 0 };
+    const bits = p.split('|');
+    if (bits.length === 1) return { id: i + 1, description: p, amount: 0, qty: 1 };
+    if (bits.length === 2) {
+      return { id: i + 1, description: bits[0].trim(), amount: Number(bits[1]) || 0, qty: 1 };
+    }
+    const pidRaw = bits[3] != null ? String(bits[3]).trim() : '';
+    return {
+      id: i + 1,
+      description: bits[0].trim(),
+      amount: Number(bits[1]) || 0,
+      qty: Number(bits[2]) || 1,
+      product_id: pidRaw ? (Number(pidRaw) || pidRaw) : null,
+    };
   }).filter(Boolean);
 }
 

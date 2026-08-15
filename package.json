@@ -1,7 +1,7 @@
 {
   "name": "smart-vision-erp",
   "productName": "Smart Vision ERP",
-  "version": "9.0.0",
+  "version": "9.3.2",
   "private": true,
   "description": "Smart Vision Enterprise \u2014 CCTV ERP (Windows desktop, SQLite)",
   "main": "electron/main.js",
