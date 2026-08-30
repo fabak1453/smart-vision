@@ -9,10 +9,12 @@ const backupJs = path.join(__dirname, 'app', 'backup-csv.js');
 let code = fs.readFileSync(appJs, 'utf8');
 // expose internals for testing
 code += `\nglobalThis.__T = { DB, TEAM, ENTITIES, createInvoice, convertQuote, receivePO, refreshDerived,
-  insightsPayload, warrantyPayload, monthCollected, cascadeCustomerRename, cascadeTeamRename,
+  insightsPayload, warrantyPayload, monthCollected, accountsPayload, cascadeCustomerRename, cascadeTeamRename,
   cascadeTeamRemove, ensureCustomer, genNum, route, api, buildTimeline, customerLinkCount, O, iso,
   buildBackupCsvBlob, buildBackupCsvText, importBackupCsv, authenticateCredentials, findTeamMemberByLogin,
-  normalizeQuoteItems, lineItemQty, parseQtyFromDescription, validateStockForLines, healAcceptedQuoteLinks };\n`;
+  normalizeQuoteItems, lineItemQty, parseQtyFromDescription, validateStockForLines, healAcceptedQuoteLinks,
+  searchPayload, routeKey, entityApplyEdit, ledgerCatNames, rememberLedgerCategory, addScannedSerial,
+  persistStateNow, applyState, attachCustomerDetail, bootPromise };\n`;
 
 // ---- browser stubs ----
 const noop = () => {};
@@ -25,7 +27,7 @@ const sandbox = {
   XMLHttpRequest: function () { this.open = noop; this.send = () => { this.status = 0; }; },
   fetch: async () => ({ ok: true }),
   document: { addEventListener: noop, hidden: false },
-  React: { useState: (v) => [typeof v === 'function' ? v() : v, noop], useEffect: noop, useCallback: (f) => f, useRef: () => ({ current: null }), createElement: (...a) => ({ $el: a[0] }), Fragment: 'Fragment' },
+  React: { useState: (v) => [typeof v === 'function' ? v() : v, noop], useEffect: noop, useCallback: (f) => f, useRef: () => ({ current: null }), createElement: (...a) => ({ $el: a[0] }), Fragment: 'Fragment', Component: function Component(props) { this.props = props; this.state = {}; } },
   encodeURIComponent, decodeURIComponent, URLSearchParams, Array, Object, Number, String, Boolean, parseInt, isNaN, Set,
   Blob,
 };
@@ -84,6 +86,19 @@ const dStock = dome.stock, eqB = DB.equipment.length;
 T.ENTITIES.serial.create({ serial_no: 'CAM-HIK-201-SN9999', product: 'Hikvision 2MP Dome', status: 'installed', customer: 'Galaxy Gym' });
 ok(dome.stock === dStock - 1, 'installed serial deducted stock');
 ok(DB.equipment.length === eqB + 1 && DB.equipment.some((e) => e.serial.serial_no === 'CAM-HIK-201-SN9999' && e.customer.name === 'Galaxy Gym'), 'installed serial auto-created equipment record');
+
+const scanStock = DB.products.find((p) => p.name === 'Hikvision 2MP Dome').stock;
+const scanned = T.addScannedSerial('SCAN-HIK-0001', 'Hikvision 2MP Dome');
+ok(scanned.ok && DB.serials.some((s) => s.serial_no === 'SCAN-HIK-0001' && s.status === 'in_stock'), 'scan-to-add registers serial as in stock');
+ok(DB.products.find((p) => p.name === 'Hikvision 2MP Dome').stock === scanStock + 1, 'scan-to-add increases product stock by 1');
+ok(T.addScannedSerial('SCAN-HIK-0001', 'Hikvision 2MP Dome').ok === false, 'scan-to-add rejects duplicate serial');
+ok(T.addScannedSerial('  ', 'Hikvision 2MP Dome').ok === false, 'scan-to-add rejects empty scan');
+ok(T.addScannedSerial('SCAN-MISS-1', 'No Such Product').ok === false, 'scan-to-add rejects unknown product');
+T.DB.equipment.push({ id: 99999, name: 'Orphan cam', location: 'x', customer: null, serial: null });
+let detailOk = true;
+try { T.attachCustomerDetail(DB.customers[0]); } catch (e) { detailOk = false; }
+ok(detailOk, 'customer drawer survives orphan equipment with null customer');
+T.DB.equipment.pop();
 
 // 6. equipment create registers serial
 const serB = DB.serials.length;
@@ -157,6 +172,20 @@ DB.customers.push({ id: 99999, name: 'Ghost Customer', area: 'X', type: 'Commerc
 await T.importBackupCsv(csvText);
 ok(!DB.customers.some((c) => c.name === 'Ghost Customer'), 'CSV restore replaces data (removes rows not in backup)');
 
+function completeCsv(partial) {
+  const Sv = sandbox.SvBackupCsv;
+  const present = new Set();
+  String(partial).split(/\r?\n/).forEach((line) => {
+    const m = line.trim().match(/^##\s+([A-Za-z0-9_]+)/);
+    if (m) present.add(m[1]);
+  });
+  const extra = Sv.TABLE_ORDER.filter((t) => !present.has(t)).map((t) => {
+    const cols = (Sv.SCHEMAS[t] && Sv.SCHEMAS[t].cols) || ['id'];
+    return '## ' + t + '\r\n' + cols.join(',') + '\r\n';
+  }).join('\r\n');
+  return partial + '\r\n' + extra;
+}
+
 // conflict: duplicate customer name in edited CSV → last row wins, single record
 const conflictCsv = [
   '# Smart Vision ERP backup v2',
@@ -171,7 +200,7 @@ const conflictCsv = [
   'id,number,customer,scope,total,status,owner,valid_till,invoice_number,job_number,items',
   ',QT-9001,Dup Co,Test scope,5000,draft,smart,2030-01-01,,,"Cam|5000"',
 ].join('\r\n');
-await T.importBackupCsv(conflictCsv);
+await T.importBackupCsv(completeCsv(conflictCsv));
 const dups = DB.customers.filter((c) => c.name === 'Dup Co');
 ok(dups.length === 1 && dups[0].lifetime_value === 100 && Number.isFinite(dups[0].id), 'duplicate customer rows collapse (last wins, id assigned)');
 ok(DB.quotes.some((q) => q.number === 'QT-9001' && q.customer?.name === 'Dup Co' && q.items?.[0]?.amount === 5000), 'Excel line-items parse on restore');
@@ -183,8 +212,20 @@ ok(T.lineItemQty({ description: 'Hikvision 2MP Dome × 16', qty: 0 }) === 16, 'l
 const hdd = DB.products.find((p) => p.name === 'WD Purple 4TB');
 const stockH = hdd.stock;
 sandbox.__alerts.length = 0;
-const blocked = T.createInvoice({ customer: 'Test Co', total: hdd.sale_price * (stockH + 50), items: [{ description: hdd.name, amount: hdd.sale_price, qty: stockH + 50, product_id: hdd.id }], persist: false });
-ok(blocked === null && hdd.stock === stockH, 'invoice blocked when stock insufficient');
+const oosInv = T.createInvoice({ customer: 'Test Co', total: hdd.sale_price * (stockH + 50), items: [{ description: hdd.name, amount: hdd.sale_price, qty: stockH + 50, product_id: hdd.id }], persist: false });
+ok(oosInv && oosInv.stock_note, 'invoice still created when stock is short (warning kept)');
+hdd.stock = 0;
+T.entityApplyEdit('product', hdd, { sku: hdd.sku, name: hdd.name, specs: hdd.specs, category: hdd.category, purchase_price: hdd.purchase_price, sale_price: hdd.sale_price, stock: 12, reserved: hdd.reserved, reorder_level: hdd.reorder_level, track_serials: 'No' });
+ok(hdd.stock === 12, 'out-of-stock product stock can be edited back to 12');
+
+const poe = T.searchPayload('poe');
+ok(poe.results.products.some((p) => /poe/i.test(p.name) || /poe/i.test(p.sku) || /poe/i.test(p.specs)), 'search finds PoE switch by partial name');
+const camSku = T.searchPayload('camhik201');
+ok(camSku.results.products.some((p) => p.sku === 'CAM-HIK-201'), 'search finds SKU without hyphens');
+const specsHit = T.searchPayload('colorvu');
+ok(specsHit.results.products.some((p) => /ColorVu/i.test(p.specs)), 'search finds inventory by specs text');
+ok(T.routeKey('/inventory?open=7') === 'inventory', 'hash query does not break inventory route');
+ok(String(T.searchPayload('hikvision').results.products.length) !== '0', 'search returns hikvision products');
 T.healAcceptedQuoteLinks();
 const qt1002 = DB.quotes.find((x) => x.number === 'QT-1002');
 ok(qt1002 && qt1002.converted && qt1002.invoice_number, 'seed accepted quote stays linked after heal');
@@ -201,7 +242,11 @@ const qtyCsv = [
   'id,number,customer,scope,total,status,owner,valid_till,invoice_number,job_number,items',
   ',QT-QTY,Qty Test,Scope,1000,draft,smart,2030-01-01,,,"Line|500|4|1"',
 ].join('\r\n');
-await T.importBackupCsv(qtyCsv);
+const invKeep = DB.invoices.length;
+let incompleteErr = '';
+try { await T.importBackupCsv(qtyCsv); } catch (e) { incompleteErr = e.message || String(e); }
+ok(/Incomplete backup/i.test(incompleteErr) && DB.invoices.length === invKeep, 'incomplete CSV restore refused (live invoices kept)');
+await T.importBackupCsv(completeCsv(qtyCsv));
 const qQty = DB.quotes.find((x) => x.number === 'QT-QTY');
 ok(qQty && qQty.items?.[0]?.qty === 4 && Number(qQty.items[0].product_id) === 1, 'CSV round-trip preserves qty and product_id');
 await T.importBackupCsv(csvText);
@@ -212,9 +257,20 @@ T.ENTITIES.customer.create({ name: 'orchid hotel', area: 'X', type: 'Commercial'
 ok(DB.customers.length === cB && sandbox.__alerts.some((a) => a.includes('already exists')), 'duplicate customer name blocked');
 
 // 16. route smoke: every endpoint returns without throwing
-['/dashboard','/leads-board','/quotes','/invoices','/invoices-stats','/reports/outstanding','/reports/warranty','/reports','/insights','/customers','/jobs','/tickets','/amc','/equipment','/credentials','/products','/serials','/purchase-orders','/repairs','/search?q=hik']
+['/dashboard','/leads-board','/quotes','/invoices','/invoices-stats','/reports/outstanding','/reports/warranty','/reports','/insights','/customers','/jobs','/tickets','/amc','/equipment','/credentials','/products','/serials','/purchase-orders','/repairs','/accounts','/search?q=hik']
   .forEach((p) => { const r = T.route(p); if (r === null || r === undefined) throw new Error('route failed: ' + p); });
-ok(true, 'all 20 API routes respond after rewiring');
+ok(true, 'all 21 API routes respond after rewiring');
+
+const accAll = T.accountsPayload('all');
+ok(accAll.money_in > 0 && accAll.money_out > 0, 'accounts: money in/out from invoices, POs and cashbook');
+ok(typeof accAll.profit === 'number' && accAll.profit === accAll.money_in - accAll.money_out, 'accounts: cash profit = in − out');
+const beforeOut = accAll.money_out;
+T.ENTITIES.ledger.create({ direction: 'out', category: 'Rent', amount: 1000, on: T.iso(0).slice(0, 10), party: 'Test', note: 'wiring' });
+const accAfter = T.accountsPayload('all');
+ok(accAfter.money_out === beforeOut + 1000 && accAfter.profit === accAll.profit - 1000, 'accounts: manual money-out reduces profit');
+T.ENTITIES.ledger.create({ direction: 'out', category: 'Rent', new_category: 'Shop electricity', amount: 500, on: T.iso(0).slice(0, 10) });
+ok(T.ledgerCatNames().includes('Shop electricity'), 'accounts: custom money-out category can be added');
+ok(DB.ledger.some((e) => e.category === 'Shop electricity' && e.amount === 500), 'accounts: custom category saved on the cash entry');
 
 console.log('\nALL ' + n + ' WIRING TESTS PASSED ✓');
 })().catch((e) => { console.error('  ✗ FAIL:', e.message); process.exit(1); });

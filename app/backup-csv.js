@@ -19,7 +19,7 @@ const MARKER = MARKER_V2;
 
 const TABLE_ORDER = [
   'team', 'customers', 'leads', 'quotes', 'invoices', 'jobs', 'tickets', 'amc',
-  'products', 'serials', 'equipment', 'credentials', 'purchaseOrders', 'repairs',
+  'products', 'serials', 'equipment', 'credentials', 'purchaseOrders', 'repairs', 'ledger',
   'catalog', 'company',
 ];
 
@@ -35,8 +35,9 @@ const SCHEMAS = {
     lists: { items: 'textList' },
   },
   company: {
-    cols: ['id', 'name', 'phone', 'email', 'web', 'address', 'gstin', 'logo', 'extras', 'quoteTerms', 'invoiceTerms'],
+    cols: ['id', 'name', 'phone', 'email', 'web', 'address', 'gstin', 'logo', 'extras', 'quoteTerms', 'invoiceTerms', 'ledgerCategories'],
     key: () => 'company',
+    lists: { ledgerCategories: 'textList' },
   },
   customers: {
     cols: ['id', 'name', 'area', 'type', 'contact_name', 'phone', 'sites', 'owner', 'lifetime_value'],
@@ -118,6 +119,11 @@ const SCHEMAS = {
     key: (r) => String(r.number || '').toLowerCase(),
     refs: { customer: 'obj', technician: 'obj' },
     nums: ['charge'],
+  },
+  ledger: {
+    cols: ['id', 'number', 'direction', 'category', 'amount', 'on', 'party', 'note'],
+    key: (r) => String(r.number || r.id || ''),
+    nums: ['amount'],
   },
 };
 
@@ -465,13 +471,14 @@ function parseV1(lines) {
     }
   }
   if (!Object.keys(counts).length) throw new Error('no records in backup');
-  return { state: { DB, TEAM }, counts };
+  return { state: { DB, TEAM }, counts, sections: ['team'].concat(Object.keys(DB)) };
 }
 
 function parseV2(rawLines) {
   const DB = {};
   const TEAM = [];
   const counts = {};
+  const sections = new Set();
   let section = null;
   let cols = null;
   let jsonMode = false;
@@ -486,6 +493,7 @@ function parseV2(rawLines) {
       const m = trimmed.match(/^##\s+([A-Za-z0-9_]+)/);
       if (m) {
         section = m[1];
+        sections.add(section);
         cols = null;
         jsonMode = /\(json\)/i.test(trimmed);
         if (!jsonMode && !SCHEMAS[section] && section !== 'team') {
@@ -552,8 +560,15 @@ function parseV2(rawLines) {
   // Full snapshot: only tables present in file are replaced via applyState clearing all then filling.
   // applyState clears all DB keys then pushes from newDB — missing tables stay empty. Good.
 
-  if (!Object.keys(counts).length) throw new Error('no records in backup');
+  if (!Object.keys(counts).length && !sections.size) throw new Error('no records in backup');
   flushSection();
+
+  sections.forEach((s) => {
+    if (s === 'team' || s === 'catalog' || s === 'company') return;
+    if (!DB[s]) DB[s] = [];
+    if (counts[s] == null) counts[s] = DB[s].length;
+  });
+  if (sections.has('team') && counts.team == null) counts.team = TEAM.length;
 
   let CATALOG = null;
   let COMPANY = null;
@@ -574,12 +589,13 @@ function parseV2(rawLines) {
       name: c.name || '', phone: c.phone || '', email: c.email || '', web: c.web || '',
       address: c.address || '', gstin: c.gstin || '', logo: c.logo || '',
       extras: c.extras || '', quoteTerms: c.quoteTerms || '', invoiceTerms: c.invoiceTerms || '',
+      ledgerCategories: Array.isArray(c.ledgerCategories) ? c.ledgerCategories : [],
     };
     counts.company = 1;
     delete DB.company;
   }
 
-  return { state: { DB, TEAM, CATALOG, COMPANY }, counts };
+  return { state: { DB, TEAM, CATALOG, COMPANY }, counts, sections: Array.from(sections) };
 }
 
 function csvToState(text) {

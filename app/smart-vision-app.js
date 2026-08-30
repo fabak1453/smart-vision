@@ -13,6 +13,18 @@ function currentPath() {
   const h = window.location.hash.replace(/^#/, '');
   return h || '/';
 }
+function routeKey(pathname) {
+  return String(pathname || '').replace(/^\//, '').split('?')[0];
+}
+function hashQuery() {
+  const h = String(window.location.hash || '').replace(/^#/, '');
+  const i = h.indexOf('?');
+  return new URLSearchParams(i < 0 ? '' : h.slice(i + 1));
+}
+function hashOpenId() {
+  const v = hashQuery().get('open');
+  return v ? String(v) : '';
+}
 function useLocation() {
   const [pathname, setPathname] = useState(currentPath());
   useEffect(() => {
@@ -1127,14 +1139,44 @@ const DB = {
     technician: O('Imran Shaikh'),
     charge: 1800,
     status: 'delivered'
+  }],
+  ledger: [{
+    id: 1,
+    number: 'CB-8001',
+    direction: 'out',
+    category: 'Rent',
+    amount: 18000,
+    on: iso(-12),
+    party: 'Shop landlord',
+    note: 'Monthly shop rent'
+  }, {
+    id: 2,
+    number: 'CB-8002',
+    direction: 'out',
+    category: 'Salary',
+    amount: 25000,
+    on: iso(-5),
+    party: 'Technicians',
+    note: 'Staff salary'
+  }, {
+    id: 3,
+    number: 'CB-8003',
+    direction: 'in',
+    category: 'Other income',
+    amount: 2500,
+    on: iso(-3),
+    party: 'Scrap buyer',
+    note: 'Old camera scrap'
   }]
 };
 
 /* ---------------- derived report payloads ---------------- */
+let dashCache = null;
 function dashboardPayload() {
   refreshDerived();
+  if (dashCache) return dashCache;
   const openLeads = DB.leads.filter(l => l.stage < 4);
-  return {
+  dashCache = {
     kpis: {
       revenue_month: monthCollected(),
       open_leads: openLeads.length,
@@ -1156,6 +1198,7 @@ function dashboardPayload() {
       status: q.status
     }))
   };
+  return dashCache;
 }
 function leadsBoardPayload() {
   const names = ['Enquiry', 'Survey', 'Quoted', 'Negotiation', 'Won'];
@@ -1183,7 +1226,7 @@ function invoiceStatsPayload() {
 function outstandingPayload() {
   return DB.invoices.filter(i => i.balance > 0).map(i => ({
     number: i.number,
-    customer: i.customer.name,
+    customer: i.customer?.name || '—',
     total: i.total,
     balance: i.balance,
     due_date: date(i.due_date),
@@ -1251,6 +1294,11 @@ function reportsPayload() {
     title: 'Receivables',
     value: lakh(st.outstanding),
     note: lakh(st.overdue) + ' overdue'
+  }, {
+    key: 'profit',
+    title: 'Cash profit — this month',
+    value: lakh(accountsPayload('month').profit),
+    note: 'money in − money out'
   }];
 }
 function insightsPayload() {
@@ -1309,31 +1357,63 @@ function insightsPayload() {
   });
   return out;
 }
+function searchNorm(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function searchCompact(s) {
+  return searchNorm(s).replace(/\s+/g, '');
+}
+function searchMatch(hay, q) {
+  const nq = searchNorm(q);
+  if (!nq) return false;
+  const h = searchNorm(hay);
+  const hc = searchCompact(hay);
+  const qc = searchCompact(q);
+  if (h.includes(nq) || qc && hc.includes(qc)) return true;
+  return nq.split(/\s+/).every(t => t && (h.includes(t) || hc.includes(t)));
+}
+function searchRank(hay, q) {
+  const h = searchNorm(hay);
+  const nq = searchNorm(q);
+  const hc = searchCompact(hay);
+  const qc = searchCompact(q);
+  if (h === nq || hc === qc) return 0;
+  if (h.startsWith(nq) || hc.startsWith(qc)) return 1;
+  if (h.split(' ').some(w => w.startsWith(nq))) return 2;
+  return 3;
+}
+function searchTop(rows, hayFn, q, limit) {
+  return rows.map((r, i) => ({
+    r,
+    i,
+    rank: searchRank(hayFn(r), q)
+  })).filter(x => searchMatch(hayFn(x.r), q)).sort((a, b) => a.rank - b.rank || a.i - b.i).slice(0, limit).map(x => x.r);
+}
 function searchPayload(q) {
-  q = (q || '').toLowerCase();
-  const m = s => String(s || '').toLowerCase().includes(q);
+  q = String(q || '').trim();
   return {
     results: {
-      customers: DB.customers.filter(c => m(c.name) || m(c.area)).slice(0, 5),
-      invoices: DB.invoices.filter(i => m(i.number) || m(i.customer.name)).slice(0, 5),
-      serials: DB.serials.filter(s => m(s.serial_no)).slice(0, 5),
-      tickets: DB.tickets.filter(t => m(t.number) || m(t.issue)).slice(0, 5),
-      products: DB.products.filter(p => m(p.sku) || m(p.name)).slice(0, 5),
-      leads: DB.leads.filter(l => m(l.name)).slice(0, 5)
+      products: searchTop(DB.products, p => [p.sku, p.name, p.specs, p.category].join(' '), q, 20),
+      customers: searchTop(DB.customers, c => [c.name, c.area, c.contact_name, c.phone].join(' '), q, 8),
+      invoices: searchTop(DB.invoices, i => [i.number, i.customer?.name, i.note].join(' '), q, 8),
+      serials: searchTop(DB.serials, s => [s.serial_no, s.product?.name, s.customer?.name].join(' '), q, 8),
+      tickets: searchTop(DB.tickets, t => [t.number, t.issue, t.customer?.name].join(' '), q, 8),
+      leads: searchTop(DB.leads, l => [l.name, l.requirement, l.source, l.segment].join(' '), q, 8)
     }
   };
 }
 
 /* ---------------- mock api router ---------------- */
 function attachCustomerDetail(c) {
+  const name = c && c.name;
   return {
     ...c,
-    equipment: DB.equipment.filter(e => e.customer.name === c.name).map(e => ({
+    equipment: DB.equipment.filter(e => e.customer?.name === name).map(e => ({
       id: e.id,
       name: e.name,
       location: e.location
     })),
-    credentials: DB.credentials.filter(cr => cr.customer.name === c.name).map(cr => ({
+    credentials: DB.credentials.filter(cr => cr.customer?.name === name).map(cr => ({
       id: cr.id,
       label: cr.label,
       host: cr.host
@@ -1384,9 +1464,13 @@ function route(path) {
   if (p === '/credentials') return {
     data: DB.credentials
   };
-  if (p === '/products') return {
-    data: DB.products
-  };
+  if (p === '/products') {
+    let data = DB.products;
+    if (filter === 'out') data = data.filter(x => num(x.stock) <= 0);else if (filter === 'low') data = data.filter(x => num(x.stock) > 0 && num(x.reorder_level) > 0 && num(x.stock) <= num(x.reorder_level));else if (filter === 'in') data = data.filter(x => num(x.stock) > 0);
+    return {
+      data
+    };
+  }
   if (p === '/serials') return {
     data: DB.serials
   };
@@ -1396,6 +1480,7 @@ function route(path) {
   if (p === '/repairs') return {
     data: DB.repairs.filter(x => !filter || x.status === filter)
   };
+  if (p === '/accounts') return accountsPayload(params.get('period') || 'month');
   if (p.startsWith('/search')) return searchPayload(params.get('q'));
   return null;
 }
@@ -1674,6 +1759,32 @@ const ICONS = {
   }), /*#__PURE__*/React.createElement("path", {
     d: "M9 12l2 2 4-4"
   })),
+  barcode: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("rect", {
+    x: "3",
+    y: "5",
+    width: "2",
+    height: "14"
+  }), /*#__PURE__*/React.createElement("rect", {
+    x: "7",
+    y: "5",
+    width: "1.4",
+    height: "14"
+  }), /*#__PURE__*/React.createElement("rect", {
+    x: "10",
+    y: "5",
+    width: "3",
+    height: "14"
+  }), /*#__PURE__*/React.createElement("rect", {
+    x: "15",
+    y: "5",
+    width: "1.4",
+    height: "14"
+  }), /*#__PURE__*/React.createElement("rect", {
+    x: "18.5",
+    y: "5",
+    width: "2.5",
+    height: "14"
+  })),
   whatsapp: /*#__PURE__*/React.createElement("path", {
     d: "M12 3a9 9 0 0 0-7.7 13.6L3 21l4.6-1.2A9 9 0 1 0 12 3zm0 2a7 7 0 0 1 5.9 10.8l.7 2.6-2.6-.7A7 7 0 1 1 12 5zm-2.3 3c-.2 0-.5.1-.7.4-.3.3-.9.9-.9 2.1s.9 2.4 1 2.6c.1.2 1.7 2.7 4.2 3.6 2 .8 2.4.7 2.9.6.5-.1 1.4-.6 1.6-1.2.2-.6.2-1 .1-1.2 0-.1-.2-.2-.5-.3l-1.7-.8c-.2-.1-.4-.1-.6.1l-.6.8c-.1.1-.3.2-.5.1-.7-.3-1.4-.6-2.3-1.7-.2-.3 0-.4.1-.6l.4-.6c.1-.2 0-.4 0-.5l-.7-1.7c-.2-.4-.4-.4-.5-.4z"
   })
@@ -1799,7 +1910,8 @@ const COMPANY_DEFAULT = {
   logo: './assets/sv-logo.png',
   extras: 'Extra: CCTV cabling (incl. PVC pipe & laying) ₹65/Mtr · Camera fitting ₹250/No.',
   quoteTerms: 'Prices are inclusive of GST. 50% advance along with the order, balance on completion. Warranty as per brand standard. This quotation is valid for 15 days from the date above.',
-  invoiceTerms: 'Thank you for your business. Please make payment by the due date via UPI / NEFT / cheque in favour of Smart Vision Enterprise.'
+  invoiceTerms: 'Thank you for your business. Please make payment by the due date via UPI / NEFT / cheque in favour of Smart Vision Enterprise.',
+  ledgerCategories: []
 };
 const COMPANY = (() => {
   try {
@@ -1928,23 +2040,28 @@ function applyCatalog(rows) {
 function applyCompany(c) {
   if (!c || typeof c !== 'object') return;
   Object.assign(COMPANY, COMPANY_DEFAULT, c);
+  if (!Array.isArray(COMPANY.ledgerCategories)) COMPANY.ledgerCategories = [];
 }
-function applyState(s) {
+function applyState(s, present) {
+  derivedDirty = true;
+  dashCache = null;
   if (!s) return;
   if (s.DB) {
     Object.keys(DB).forEach(k => {
-      if (Array.isArray(DB[k])) DB[k].length = 0;
-    });
-    Object.entries(s.DB).forEach(([k, rows]) => {
-      if (Array.isArray(DB[k]) && Array.isArray(rows)) rows.forEach(x => DB[k].push(x));
+      if (!Array.isArray(DB[k])) return;
+      if (present && !present.has(k)) return;
+      DB[k].length = 0;
+      if (Array.isArray(s.DB[k])) s.DB[k].forEach(x => DB[k].push(x));
     });
   }
-  if (Array.isArray(s.TEAM)) {
-    TEAM.length = 0;
-    s.TEAM.forEach(x => TEAM.push(x));
+  if (!present || present.has('team')) {
+    if (Array.isArray(s.TEAM)) {
+      TEAM.length = 0;
+      s.TEAM.forEach(x => TEAM.push(x));
+    }
   }
-  if (Array.isArray(s.CATALOG)) applyCatalog(s.CATALOG);
-  if (s.COMPANY) applyCompany(s.COMPANY);
+  if (Array.isArray(s.CATALOG) && (!present || present.has('catalog'))) applyCatalog(s.CATALOG);
+  if (s.COMPANY && (!present || present.has('company'))) applyCompany(s.COMPANY);
   ensureTeamLoginDefaults();
 }
 function snapshotState() {
@@ -1960,6 +2077,10 @@ function snapshotState() {
 }
 let lastSaved = '';
 let persistQueue = Promise.resolve();
+let persistWanted = false;
+function markSaved(payload) {
+  lastSaved = payload;
+}
 async function persistStateNow() {
   let payload;
   try {
@@ -1968,14 +2089,16 @@ async function persistStateNow() {
     return false;
   }
   if (payload === lastSaved) return true;
-  lastSaved = payload;
   let localOk = true;
   try {
     localStorage.setItem(PERSIST_KEY, payload);
   } catch (e) {
     localOk = false;
   }
-  if (!serverOK) return localOk;
+  if (!serverOK) {
+    if (localOk) markSaved(payload);
+    return localOk;
+  }
   try {
     const res = await fetch(API_URL, {
       method: 'POST',
@@ -1984,7 +2107,9 @@ async function persistStateNow() {
       },
       body: payload
     });
-    return localOk && res.ok;
+    const ok = localOk && !!(res && res.ok);
+    if (ok) markSaved(payload);
+    return ok;
   } catch (e) {
     return false;
   }
@@ -1997,7 +2122,6 @@ function writeStateSync() {
     return;
   }
   if (payload === lastSaved) return;
-  lastSaved = payload;
   try {
     localStorage.setItem(PERSIST_KEY, payload);
   } catch (e) {/* ignore */}
@@ -2012,7 +2136,9 @@ function writeStateSync() {
         keepalive: true
       });
     } catch (e) {/* ignore */}
+    return;
   }
+  markSaved(payload);
 }
 function tableCount(state, key) {
   const rows = state && state.DB && state.DB[key];
@@ -2043,52 +2169,64 @@ async function commitChange(work) {
   return ok;
 }
 function afterMutation() {
+  persistWanted = true;
+  derivedDirty = true;
+  dashCache = null;
   if (typeof window !== 'undefined') {
     try {
       window.dispatchEvent(new CustomEvent('sv-persist-start'));
     } catch (e) {/* ignore */}
   }
   persistQueue = persistQueue.then(async () => {
-    const ok = await persistStateNow();
+    let lastOk = true;
+    while (persistWanted) {
+      persistWanted = false;
+      lastOk = await persistStateNow();
+    }
     if (typeof window !== 'undefined') {
       try {
         window.dispatchEvent(new CustomEvent('sv-persist', {
           detail: {
-            ok
+            ok: lastOk
           }
         }));
       } catch (e) {/* ignore */}
     }
-    return ok;
+    return lastOk;
   });
   return persistQueue;
 }
-(function boot() {
-  let serverState = null;
+async function loadServerState() {
   try {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', API_URL + '?t=' + Date.now(), false); // sync so DB is ready before first render
-    xhr.send(null);
-    if (xhr.status >= 200 && xhr.status < 300) {
-      serverOK = true;
+    const res = await fetch(API_URL + '?t=' + Date.now());
+    if (!res || !res.ok) return null;
+    serverOK = true;
+    if (typeof res.text === 'function') {
+      const raw = await res.text();
+      if (!raw) return null;
       try {
-        serverState = JSON.parse(xhr.responseText || 'null');
+        return JSON.parse(raw);
       } catch (e) {
-        serverState = null;
+        return null;
       }
     }
-  } catch (e) {/* no backend reachable */}
-  let localState = null;
-  try {
-    localState = JSON.parse(localStorage.getItem(PERSIST_KEY) || 'null');
-  } catch (e) {/* ignore */}
+    if (typeof res.json === 'function') {
+      try {
+        return await res.json();
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+function finishBoot(serverState, localState) {
   const sc = stateRecordCount(serverState);
   const lc = stateRecordCount(localState);
   const sAt = Number(serverState && serverState.savedAt) || 0;
   const lAt = Number(localState && localState.savedAt) || 0;
-
-  // Prefer whichever snapshot actually has data. Empty server `{}` must NOT keep seed
-  // demo in memory — that used to overwrite real saves on the next persist tick.
   if (sc > 0 && lc > 0) {
     if (shouldPreferLocalSnapshot(localState, serverState, lc, sc, lAt, sAt)) applyState(localState);else applyState(serverState);
   } else if (sc > 0) {
@@ -2096,19 +2234,27 @@ function afterMutation() {
   } else if (lc > 0) {
     applyState(localState);
   }
-  // else: first run — keep in-file seed demo until the user edits / restores
   ensureTeamLoginDefaults();
   healAcceptedQuoteLinks();
   try {
     const leg = JSON.parse(localStorage.getItem('sv_catalog') || 'null');
     if (Array.isArray(leg) && leg.length && leg.length > CATALOG.length) applyCatalog(leg);
   } catch (e) {/* ignore */}
-  if (serverOK && (sc > 0 || lc > 0)) {
-    queueMicrotask(() => {
-      afterMutation();
-    });
-  }
-})();
+  if (serverOK && (sc > 0 || lc > 0)) afterMutation();
+}
+let bootReady = false;
+const bootPromise = (async () => {
+  let localState = null;
+  try {
+    localState = JSON.parse(localStorage.getItem(PERSIST_KEY) || 'null');
+  } catch (e) {/* ignore */}
+  if (stateRecordCount(localState) > 0) applyState(localState);
+  const serverState = await loadServerState();
+  finishBoot(serverState, localState);
+  bootReady = true;
+})().catch(() => {
+  bootReady = true;
+});
 function persistState() {
   afterMutation();
 }
@@ -2141,14 +2287,16 @@ function buildBackupCsvBlob() {
 function parseBackupCsv(text) {
   const {
     state,
-    counts
+    counts,
+    sections
   } = SvCsv.csvToState(text);
   return {
     newDB: state.DB || {},
     newTeam: state.TEAM || [],
     newCatalog: state.CATALOG,
     newCompany: state.COMPANY,
-    counts
+    counts,
+    sections
   };
 }
 async function importBackupCsv(text) {
@@ -2157,14 +2305,23 @@ async function importBackupCsv(text) {
     newTeam,
     newCatalog,
     newCompany,
-    counts
+    counts,
+    sections
   } = parseBackupCsv(text);
+  const present = new Set(Array.isArray(sections) && sections.length ? sections : Object.keys(newDB || {}));
+  if (Array.isArray(newTeam)) present.add('team');
+  if (newCatalog) present.add('catalog');
+  if (newCompany) present.add('company');
+  const omitted = Object.keys(DB).filter(k => Array.isArray(DB[k]) && DB[k].length > 0 && !present.has(k));
+  if (omitted.length) {
+    throw new Error('Incomplete backup (missing ## ' + omitted.join(', ## ') + '). Restore cancelled so live data is not wiped.');
+  }
   applyState({
     DB: newDB,
     TEAM: newTeam,
     CATALOG: newCatalog,
     COMPANY: newCompany
-  });
+  }, present);
   lastSaved = '';
   await persistStateNow();
   return counts;
@@ -2272,8 +2429,7 @@ function validateStockForLines(lines) {
       return;
     }
     if (num(p.stock) < qty) {
-      warnings.push(`${p.name}: need ${qty}, only ${p.stock} in stock`);
-      blocked = true;
+      warnings.push(`${p.name}: need ${qty}, only ${p.stock} in stock — invoice will still save, restock from Inventory`);
     }
   });
   return {
@@ -2364,19 +2520,21 @@ function ensureCustomer(lead) {
 // Accepted quote → invoice + installation job + mark lead as Won (once).
 function convertQuote(q) {
   if (!q || q.converted || q.status !== 'accepted') return false;
+  const custName = q.customer?.name;
+  if (!custName) return false;
   q.converted = true;
-  const lead = DB.leads.find(l => l.name === q.customer.name && l.stage < 4);
+  const lead = DB.leads.find(l => l.name === custName && l.stage < 4);
   if (lead) {
     lead.stage = 4;
     ensureCustomer(lead);
   }
-  if (!DB.customers.some(c => c.name === q.customer.name)) ensureCustomer({
-    name: q.customer.name,
+  if (!DB.customers.some(c => c.name === custName)) ensureCustomer({
+    name: custName,
     segment: 'Commercial',
     owner: q.owner
   });
   const inv = createInvoice({
-    customer: q.customer.name,
+    customer: custName,
     total: q.total,
     items: q.items || [],
     note: 'From ' + q.number,
@@ -2391,7 +2549,7 @@ function convertQuote(q) {
   const job = {
     id: nextId(DB.jobs),
     number: genNum('JOB-', DB.jobs, 3000),
-    customer: O(q.customer.name),
+    customer: O(custName),
     type: 'install',
     scope: q.scope || 'Installation per ' + q.number,
     scheduled_on: iso(3),
@@ -2409,6 +2567,7 @@ function convertQuote(q) {
 function receivePO(po) {
   if (!po || po.stocked) return;
   po.stocked = true;
+  if (!po.received_on) po.received_on = iso(0);
   (po.items || []).forEach(it => {
     const p = DB.products.find(x => x.name === it.description);
     if (p) p.stock = num(p.stock) + num(it.qty);
@@ -2417,8 +2576,14 @@ function receivePO(po) {
 }
 // Live derived statuses — recomputed from dates on every read so nothing
 // stays frozen in time (invoices→overdue, AMC→expiring/expired, warranty).
+let derivedDirty = true;
+let derivedDay = '';
 function refreshDerived() {
   const now = TODAY.getTime();
+  const day = TODAY.toISOString().slice(0, 10);
+  if (!derivedDirty && day === derivedDay) return;
+  derivedDirty = false;
+  derivedDay = day;
   DB.invoices.forEach(i => {
     i.balance = num(i.total) - num(i.paid);
     if (i.balance <= 0 && num(i.total) > 0) i.status = 'paid';else if (new Date(i.due_date).getTime() < now && i.balance > 0) i.status = 'overdue';else if (num(i.paid) > 0) i.status = 'partial';else if (i.status === 'paid' || i.status === 'overdue' || i.status === 'partial') i.status = 'sent';
@@ -2447,6 +2612,117 @@ function monthCollected() {
     if (Array.isArray(i.payments) && i.payments.length) return a + i.payments.filter(p => inMonth(p.on)).reduce((s, p) => s + num(p.amount), 0);
     return a + (inMonth(i.issue_date) ? num(i.paid) : 0);
   }, 0);
+}
+function parseEntryDate(v) {
+  const s = String(v || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(s + 'T12:00:00').toISOString();
+  if (s && !Number.isNaN(new Date(s).getTime())) return new Date(s).toISOString();
+  return iso(0);
+}
+function inAccountsPeriod(d, period) {
+  if (period !== 'month') return true;
+  const x = new Date(d);
+  return x.getFullYear() === TODAY.getFullYear() && x.getMonth() === TODAY.getMonth();
+}
+function ensureLedger() {
+  if (!Array.isArray(DB.ledger)) DB.ledger = [];
+}
+function invoiceCashMoves() {
+  const rows = [];
+  DB.invoices.forEach(i => {
+    if (Array.isArray(i.payments) && i.payments.length) {
+      i.payments.forEach((p, idx) => {
+        const amt = num(p.amount);
+        if (amt <= 0) return;
+        rows.push({
+          id: 'inv-' + i.id + '-' + idx,
+          source: 'invoice',
+          direction: 'in',
+          category: 'Customer collection',
+          amount: amt,
+          on: p.on || i.issue_date,
+          party: i.customer?.name || '—',
+          note: i.number,
+          number: i.number,
+          locked: true
+        });
+      });
+      return;
+    }
+    const amt = num(i.paid);
+    if (amt <= 0) return;
+    rows.push({
+      id: 'inv-' + i.id,
+      source: 'invoice',
+      direction: 'in',
+      category: 'Customer collection',
+      amount: amt,
+      on: i.issue_date,
+      party: i.customer?.name || '—',
+      note: i.number,
+      number: i.number,
+      locked: true
+    });
+  });
+  return rows;
+}
+function purchaseCashMoves() {
+  return DB.purchaseOrders.filter(p => p.status === 'received' || p.stocked).map(p => ({
+    id: 'po-' + p.id,
+    source: 'purchase',
+    direction: 'out',
+    category: 'Purchase',
+    amount: num(p.total),
+    on: p.received_on || p.eta || p.ordered_on,
+    party: p.supplier?.name || '—',
+    note: p.number,
+    number: p.number,
+    locked: true
+  })).filter(r => r.amount > 0);
+}
+function ledgerCashMoves() {
+  ensureLedger();
+  return DB.ledger.map(e => ({
+    id: e.id,
+    source: 'ledger',
+    direction: e.direction === 'out' ? 'out' : 'in',
+    category: e.category || 'Miscellaneous',
+    amount: num(e.amount),
+    on: e.on,
+    party: e.party || '—',
+    note: e.note || '',
+    number: e.number,
+    locked: false
+  })).filter(r => r.amount > 0);
+}
+function accountsPayload(period) {
+  ensureLedger();
+  const p = period === 'all' ? 'all' : 'month';
+  const rows = [...invoiceCashMoves(), ...purchaseCashMoves(), ...ledgerCashMoves()].filter(r => inAccountsPeriod(r.on, p)).sort((a, b) => new Date(b.on) - new Date(a.on));
+  const money_in = rows.filter(r => r.direction === 'in').reduce((a, r) => a + r.amount, 0);
+  const money_out = rows.filter(r => r.direction === 'out').reduce((a, r) => a + r.amount, 0);
+  const collections = rows.filter(r => r.direction === 'in' && r.source === 'invoice').reduce((a, r) => a + r.amount, 0);
+  const other_in = rows.filter(r => r.direction === 'in' && r.source !== 'invoice').reduce((a, r) => a + r.amount, 0);
+  const purchases = rows.filter(r => r.source === 'purchase').reduce((a, r) => a + r.amount, 0);
+  const expenses = rows.filter(r => r.direction === 'out' && r.source !== 'purchase').reduce((a, r) => a + r.amount, 0);
+  const billed = DB.invoices.filter(i => inAccountsPeriod(i.issue_date, p)).reduce((a, i) => a + num(i.total), 0);
+  const profit = money_in - money_out;
+  const margin = money_in > 0 ? Math.round(profit / money_in * 100) : 0;
+  const book_profit = billed - purchases - expenses + other_in;
+  return {
+    period: p,
+    rows,
+    money_in,
+    money_out,
+    profit,
+    margin,
+    billed,
+    collections,
+    other_in,
+    purchases,
+    expenses,
+    book_profit
+  };
 }
 // Customer rename cascades to every module that links by name.
 function cascadeCustomerRename(oldName, newName) {
@@ -2579,7 +2855,34 @@ function waOpen(custName, message, docOpts) {
 }
 const custNames = () => DB.customers.map(c => c.name);
 const prodNames = () => DB.products.map(p => p.name);
-const suppNames = () => [...new Set(DB.purchaseOrders.map(p => p.supplier.name))];
+const suppNames = () => [...new Set(DB.purchaseOrders.map(p => p.supplier?.name).filter(Boolean))];
+const LEDGER_DEFAULT_CATS = ['Rent', 'Salary', 'Travel', 'Fuel', 'Tools', 'Office', 'Tax', 'Petty cash', 'Other income', 'Owner capital', 'Supplier refund', 'Miscellaneous'];
+function rememberLedgerCategory(name) {
+  const n = String(name || '').trim();
+  if (!n) return '';
+  if (!Array.isArray(COMPANY.ledgerCategories)) COMPANY.ledgerCategories = [];
+  const exists = [...LEDGER_DEFAULT_CATS, ...COMPANY.ledgerCategories].some(c => String(c).toLowerCase() === n.toLowerCase());
+  if (!exists) COMPANY.ledgerCategories.push(n);
+  return n;
+}
+function resolveLedgerCategory(v) {
+  const custom = String(v && v.new_category || '').trim();
+  const picked = String(v && v.category || '').trim();
+  const name = rememberLedgerCategory(custom || picked) || 'Miscellaneous';
+  return name;
+}
+function ledgerCatNames() {
+  if (!Array.isArray(COMPANY.ledgerCategories)) COMPANY.ledgerCategories = [];
+  const used = (DB.ledger || []).map(e => e.category).filter(Boolean);
+  const all = [...LEDGER_DEFAULT_CATS, ...COMPANY.ledgerCategories, ...used];
+  const seen = new Set();
+  return all.filter(c => {
+    const k = String(c || '').trim().toLowerCase();
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
 const ENTITIES = {
   lead: {
     label: 'Lead',
@@ -2955,7 +3258,9 @@ const ENTITIES = {
     }, {
       key: 'stock',
       label: 'Stock',
-      type: 'number'
+      type: 'number',
+      min: 0,
+      default: 0
     }, {
       key: 'reserved',
       label: 'Reserved',
@@ -3258,8 +3563,102 @@ const ENTITIES = {
       charge: num(v.charge),
       status: v.status || 'received'
     })
+  },
+  ledger: {
+    label: 'Cash entry',
+    fields: [{
+      key: 'direction',
+      label: 'Type',
+      type: 'select',
+      options: [['in', 'Money in'], ['out', 'Money out']],
+      default: 'in'
+    }, {
+      key: 'category',
+      label: 'Category',
+      type: 'select',
+      options: ledgerCatNames,
+      default: 'Miscellaneous'
+    }, {
+      key: 'new_category',
+      label: 'Or type a new category (saved for next time)'
+    }, {
+      key: 'amount',
+      label: 'Amount (₹)',
+      type: 'number'
+    }, {
+      key: 'on',
+      label: 'Date (YYYY-MM-DD)',
+      default: iso(0).slice(0, 10)
+    }, {
+      key: 'party',
+      label: 'From / to (person or vendor)'
+    }, {
+      key: 'note',
+      label: 'Note'
+    }],
+    create: v => {
+      ensureLedger();
+      const amt = num(v.amount);
+      if (amt <= 0) {
+        alert('Enter an amount greater than 0.');
+        return false;
+      }
+      DB.ledger.push({
+        id: nextId(DB.ledger),
+        number: genNum('CB-', DB.ledger, 8000),
+        direction: v.direction === 'out' ? 'out' : 'in',
+        category: resolveLedgerCategory(v),
+        amount: amt,
+        on: parseEntryDate(v.on),
+        party: (v.party || '').trim(),
+        note: (v.note || '').trim()
+      });
+      return true;
+    }
   }
 };
+function addScannedSerial(serialNo, productName) {
+  const sn = String(serialNo || '').replace(/[\r\n\t]/g, '').trim();
+  if (!sn) return {
+    ok: false,
+    error: 'Empty scan — try again.'
+  };
+  const product = String(productName || '').trim();
+  if (!product) return {
+    ok: false,
+    error: 'Select a product first, then scan.'
+  };
+  const dup = DB.serials.find(s => String(s.serial_no || '').toLowerCase() === sn.toLowerCase());
+  if (dup) return {
+    ok: false,
+    error: 'Already registered: ' + dup.serial_no,
+    existing: dup
+  };
+  const p = DB.products.find(x => x.name === product);
+  if (!p) return {
+    ok: false,
+    error: 'Product not found — pick a product from the list, then scan.'
+  };
+  const row = {
+    id: nextId(DB.serials),
+    serial_no: sn,
+    product: O(product),
+    customer: null,
+    status: 'in_stock',
+    in_warranty: false,
+    sold_on: null,
+    warranty_end: null
+  };
+  DB.serials.push(row);
+  p.stock = num(p.stock) + 1;
+  p.track_serials = true;
+  afterMutation();
+  return {
+    ok: true,
+    serial: row,
+    product: p
+  };
+}
 const ENTITY_STORE = {
   lead: 'leads',
   quote: 'quotes',
@@ -3273,7 +3672,8 @@ const ENTITY_STORE = {
   credential: 'credentials',
   po: 'purchaseOrders',
   equipment: 'equipment',
-  repair: 'repairs'
+  repair: 'repairs',
+  ledger: 'ledger'
 };
 function entityDelete(entity, id) {
   const table = ENTITY_STORE[entity];
@@ -3636,6 +4036,15 @@ function entityToInitial(entity, r) {
     due_date: r.due_date || '',
     note: r.note || ''
   };
+  if (entity === 'ledger') return {
+    direction: r.direction || 'in',
+    category: r.category || 'Miscellaneous',
+    amount: r.amount,
+    on: String(r.on || '').slice(0, 10),
+    party: r.party || '',
+    note: r.note || '',
+    new_category: ''
+  };
   return {};
 }
 function entityApplyEdit(entity, row, v) {
@@ -3714,7 +4123,7 @@ function entityApplyEdit(entity, row, v) {
         category: v.category || row.category,
         purchase_price: num(v.purchase_price),
         sale_price: num(v.sale_price),
-        stock: num(v.stock),
+        stock: Math.max(0, num(v.stock)),
         reserved: num(v.reserved),
         reorder_level: num(v.reorder_level),
         track_serials: v.track_serials === 'Yes'
@@ -3794,6 +4203,17 @@ function entityApplyEdit(entity, row, v) {
         items: normItems
       });
       row.balance = row.total - row.paid;
+      return;
+    }
+    if (entity === 'ledger') {
+      Object.assign(row, {
+        direction: v.direction === 'out' ? 'out' : 'in',
+        category: resolveLedgerCategory(v),
+        amount: num(v.amount),
+        on: parseEntryDate(v.on),
+        party: v.party || '',
+        note: v.note || ''
+      });
       return;
     }
   } finally {
@@ -3885,7 +4305,8 @@ function FormModal({
     }) : /*#__PURE__*/React.createElement("input", {
       className: "inp",
       type: f.type === 'number' ? 'number' : 'text',
-      value: form[f.key],
+      min: f.type === 'number' ? f.min ?? 0 : undefined,
+      value: form[f.key] ?? '',
       onChange: e => set(f.key, e.target.value)
     }));
   }), /*#__PURE__*/React.createElement("div", {
@@ -3916,7 +4337,8 @@ function CreateButton({
   entity,
   label,
   onDone,
-  className
+  className,
+  initial
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -3942,10 +4364,11 @@ function CreateButton({
     s: 14,
     sw: 2.2
   }), label || 'New ' + cfg.label), open && /*#__PURE__*/React.createElement(FormModal, {
-    title: 'New ' + cfg.label,
+    title: label || 'New ' + cfg.label,
     fields: cfg.fields,
-    submitLabel: 'Create ' + cfg.label,
+    submitLabel: 'Save',
     busy: busy,
+    initial: initial,
     onClose: () => {
       if (!busy) setOpen(false);
     },
@@ -3959,24 +4382,24 @@ function NotifPopover({
   refreshDerived(); // v5: notifications read live AMC/invoice/warranty status
   const items = [...DB.tickets.filter(t => (t.sla_state === 'breached' || t.sla_state === 'at_risk') && t.status !== 'resolved' && t.status !== 'closed').map(t => ({
     tone: 'red',
-    text: `${t.number} · ${t.customer.name}`,
+    text: `${t.number} · ${t.customer?.name || '—'}`,
     sub: t.issue,
     path: '/tickets'
   })), ...DB.amc.filter(a => a.status === 'expiring').map(a => ({
     tone: 'amber',
-    text: `AMC expiring · ${a.customer.name}`,
+    text: `AMC expiring · ${a.customer?.name || '—'}`,
     sub: `Ends ${date(a.ends_on)}`,
     path: '/amc'
   })), ...DB.invoices.filter(i => i.status === 'overdue').map(i => ({
     tone: 'red',
-    text: `Overdue · ${i.customer.name}`,
+    text: `Overdue · ${i.customer?.name || '—'}`,
     sub: `${i.number} · ${inr(i.balance)} due ${date(i.due_date)}`,
     path: '/invoices'
   })), ...DB.products.filter(p => p.reorder_level > 0 && p.stock <= p.reorder_level).map(p => ({
     tone: 'amber',
     text: `Low stock · ${p.name}`,
     sub: `${p.stock} left`,
-    path: '/inventory'
+    path: '/inventory?open=' + p.id
   }))];
   return /*#__PURE__*/React.createElement("div", {
     onMouseLeave: onClose,
@@ -4110,7 +4533,7 @@ function DwBox({
 }
 
 /* ---------------- Shell ---------------- */
-const NAV = [['Sales', [['', 'grid', 'Dashboard'], ['leads', 'layers', 'CRM / Leads'], ['quotes', 'file', 'Quotations'], ['invoices', 'file', 'Billing & Invoices'], ['outstanding', 'alert', 'Outstanding'], ['customers', 'users', 'Customers']]], ['Operations', [['jobs', 'calendar', 'Installation Jobs'], ['tickets', 'tag', 'Service Tickets'], ['service', 'wrench', 'Service & Repair'], ['amc', 'check', 'AMC Management'], ['equipment', 'shield', 'Equipment Register'], ['credentials', 'key', 'Credential Manager']]], ['Catalog', [['inventory', 'box', 'Inventory'], ['serials', 'box', 'Serial Tracking'], ['warranty', 'shield', 'Warranty'], ['purchasing', 'download', 'Purchase Mgmt']]], ['Insights', [['reports', 'chart', 'Reports'], ['insights', 'sliders', 'AI Insights'], ['team', 'users', 'Team & Owners'], ['settings', 'sliders', 'Settings']]]];
+const NAV = [['Sales', [['', 'grid', 'Dashboard'], ['leads', 'layers', 'CRM / Leads'], ['quotes', 'file', 'Quotations'], ['invoices', 'file', 'Billing & Invoices'], ['outstanding', 'alert', 'Outstanding'], ['accounts', 'wallet', 'Accounts'], ['customers', 'users', 'Customers']]], ['Operations', [['jobs', 'calendar', 'Installation Jobs'], ['tickets', 'tag', 'Service Tickets'], ['service', 'wrench', 'Service & Repair'], ['amc', 'check', 'AMC Management'], ['equipment', 'shield', 'Equipment Register'], ['credentials', 'key', 'Credential Manager']]], ['Catalog', [['inventory', 'box', 'Inventory'], ['serials', 'box', 'Serial Tracking'], ['warranty', 'shield', 'Warranty'], ['purchasing', 'download', 'Purchase Mgmt']]], ['Insights', [['reports', 'chart', 'Reports'], ['insights', 'sliders', 'AI Insights'], ['team', 'users', 'Team & Owners'], ['settings', 'sliders', 'Settings']]]];
 const BOTTOM = [['', 'grid', 'Home'], ['leads', 'layers', 'CRM'], ['tickets', 'tag', 'Tickets'], ['inventory', 'box', 'Stock'], ['jobs', 'calendar', 'Jobs']];
 function Shell({
   active,
@@ -4123,14 +4546,19 @@ function Shell({
   const [q, setQ] = useState('');
   const [notif, setNotif] = useState(false);
   const [saveState, setSaveState] = useState('saved');
-  const cur = active ?? loc.pathname.replace('/', '');
+  const cur = active ?? routeKey(loc.pathname);
   const go = id => {
     nav('/' + id);
     setSbOpen(false);
   };
-  const user = JSON.parse(localStorage.getItem('sv_user') || '{}');
+  let user = {};
+  try {
+    user = JSON.parse(localStorage.getItem('sv_user') || '{}') || {};
+  } catch (e) {
+    user = {};
+  }
   useEffect(() => {
-    if (q.length < 2) {
+    if (q.length < 1) {
       setResults(null);
       return;
     }
@@ -4237,10 +4665,10 @@ function Shell({
     n: "search",
     s: 15
   }), /*#__PURE__*/React.createElement("input", {
-    placeholder: "Smart search — customers, invoices, serials, tickets…",
+    placeholder: "Search products, SKU, customers, invoices…",
     value: q,
     onChange: e => setQ(e.target.value),
-    onBlur: () => setTimeout(() => setResults(null), 200)
+    onBlur: () => setTimeout(() => setResults(null), 220)
   }), results && /*#__PURE__*/React.createElement(SearchResults, {
     results: results,
     onPick: path => {
@@ -4302,7 +4730,7 @@ function SearchResults({
   results,
   onPick
 }) {
-  const groups = [['customers', 'Customers', () => `/customers`, r => r.name], ['invoices', 'Invoices', () => `/invoices`, r => r.number], ['serials', 'Serials', () => `/serials`, r => r.serial_no], ['tickets', 'Tickets', () => `/tickets`, r => `${r.number} — ${r.issue}`], ['products', 'Products', () => `/inventory`, r => `${r.sku} — ${r.name}`], ['leads', 'Leads', () => `/leads`, r => r.name]];
+  const groups = [['products', 'Inventory', r => `/inventory?open=${r.id}`, r => `${r.sku} — ${r.name}${num(r.stock) <= 0 ? ' · out of stock' : ' · ' + r.stock + ' in stock'}`], ['customers', 'Customers', r => `/customers?open=${r.id}`, r => r.name], ['invoices', 'Invoices', r => `/invoices?open=${r.id}`, r => r.number], ['serials', 'Serials', r => `/serials?open=${r.id}`, r => r.serial_no], ['tickets', 'Tickets', r => `/tickets?open=${r.id}`, r => `${r.number} — ${r.issue}`], ['leads', 'Leads', r => `/leads?open=${r.id}`, r => r.name]];
   const any = groups.some(([k]) => (results[k] || []).length);
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -4375,6 +4803,22 @@ function StatRow({
     className: "stc-row"
   }, children);
 }
+function useHashOpen(rows, openFn, loading) {
+  const loc = useLocation();
+  const openRef = useRef(openFn);
+  const rowsRef = useRef(rows);
+  openRef.current = openFn;
+  rowsRef.current = rows;
+  useEffect(() => {
+    if (loading) return;
+    const id = hashOpenId();
+    if (!id) return;
+    const list = rowsRef.current;
+    if (!Array.isArray(list) || !list.length) return;
+    const r = list.find(x => String(x.id) === id);
+    if (r) openRef.current(r);
+  }, [loading, loc.pathname]);
+}
 
 /* ---------------- TablePage ---------------- */
 function TablePage({
@@ -4389,9 +4833,13 @@ function TablePage({
   actions,
   primaryAction,
   entity,
-  recFoot
+  recFoot,
+  rowSearch,
+  refresh
 }) {
+  const loc = useLocation();
   const [filter, setFilter] = useState(chips?.[0]?.value ?? null);
+  const [qLocal, setQLocal] = useState('');
   const [rec, setRec] = useState(null);
   const [editRow, setEditRow] = useState(null);
   const path = endpoint + (filter ? (endpoint.includes('?') ? '&' : '?') + 'filter=' + filter : '');
@@ -4399,8 +4847,9 @@ function TablePage({
     data,
     loading,
     reload
-  } = useFetch(path, [path]);
-  const rows = Array.isArray(data) ? data : data?.data ?? [];
+  } = useFetch(path, [path, refresh]);
+  const allRows = Array.isArray(data) ? data : data?.data ?? [];
+  const rows = rowSearch && qLocal.trim() ? allRows.filter(r => searchMatch(rowSearch(r), qLocal)) : allRows;
   const cfg = entity ? ENTITIES[entity] : null;
   const canMutate = !!(entity && ENTITY_STORE[entity]);
   const doDelete = async r => {
@@ -4444,6 +4893,15 @@ function TablePage({
     }, "Delete"), extra);
     setRec(base);
   };
+  const openRowRef = useRef(openRow);
+  openRowRef.current = openRow;
+  useEffect(() => {
+    if (loading) return;
+    const id = hashOpenId();
+    if (!id) return;
+    const r = allRows.find(x => String(x.id) === id);
+    if (r) openRowRef.current(r);
+  }, [loading, loc.pathname, data]);
   return /*#__PURE__*/React.createElement(Shell, {
     active: active
   }, /*#__PURE__*/React.createElement(PageHead, {
@@ -4461,13 +4919,26 @@ function TablePage({
   }), "New"))), stats && /*#__PURE__*/React.createElement(StatRow, null, stats.map((s, i) => /*#__PURE__*/React.createElement(Stat, {
     key: i,
     ...s
-  }))), chips && /*#__PURE__*/React.createElement("div", {
-    className: "chips"
-  }, chips.map(c => /*#__PURE__*/React.createElement("span", {
+  }))), (chips || rowSearch) && /*#__PURE__*/React.createElement("div", {
+    className: "chips",
+    style: {
+      alignItems: 'center'
+    }
+  }, chips && chips.map(c => /*#__PURE__*/React.createElement("span", {
     key: c.value ?? 'all',
     className: 'chip' + ((c.value ?? null) === filter ? ' on' : ''),
     onClick: () => setFilter(c.value ?? null)
-  }, c.label))), /*#__PURE__*/React.createElement("div", {
+  }, c.label)), rowSearch && /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    style: {
+      marginLeft: 'auto',
+      maxWidth: 240,
+      height: 34
+    },
+    placeholder: "Find on this page…",
+    value: qLocal,
+    onChange: e => setQLocal(e.target.value)
+  })), /*#__PURE__*/React.createElement("div", {
     className: "panel"
   }, loading ? /*#__PURE__*/React.createElement("div", {
     className: "loading"
@@ -5759,6 +6230,7 @@ function Leads() {
       sw: 2.4
     }), "Advance Stage")
   });
+  useHashOpen(data ? data.flatMap(c => c.items) : [], openLead, loading);
   return /*#__PURE__*/React.createElement(Shell, {
     active: "leads"
   }, /*#__PURE__*/React.createElement(PageHead, {
@@ -6340,6 +6812,7 @@ function Invoices() {
       sw: 2.4
     }), "Record Payment"))
   });
+  useHashOpen(rows, open, loading);
   return /*#__PURE__*/React.createElement(Shell, {
     active: "invoices"
   }, /*#__PURE__*/React.createElement(PageHead, {
@@ -6487,11 +6960,228 @@ function Outstanding() {
     dot: true
   }, r.status)))))))));
 }
+function Accounts() {
+  const [period, setPeriod] = useState('month');
+  const [dir, setDir] = useState(null);
+  const [rec, setRec] = useState(null);
+  const [editRow, setEditRow] = useState(null);
+  const {
+    data,
+    loading,
+    reload
+  } = useFetch('/accounts?period=' + period, [period]);
+  const rows = (data?.rows || []).filter(r => !dir || r.direction === dir);
+  const today = iso(0).slice(0, 10);
+  const open = r => {
+    const locked = !!r.locked;
+    setRec({
+      title: r.direction === 'in' ? 'Money in' : 'Money out',
+      subtitle: r.number || r.category,
+      icon: 'wallet',
+      body: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(DwSection, {
+        label: "Entry"
+      }, /*#__PURE__*/React.createElement(DwBox, {
+        rows: [['Type', r.direction === 'in' ? 'Money in' : 'Money out'], ['Category', r.category], ['Amount', inr(r.amount)], ['Date', date(r.on)], ['Party', r.party || '—'], ['Source', r.source === 'invoice' ? 'Invoice payment' : r.source === 'purchase' ? 'Purchase order' : 'Manual cashbook'], ['Note', r.note || '—']]
+      })), locked && /*#__PURE__*/React.createElement("div", {
+        className: "t2",
+        style: {
+          padding: '8px 2px'
+        }
+      }, r.source === 'invoice' ? 'Collected from Billing — record extra payments on the invoice.' : 'Paid via Purchase Management when the PO is marked received.')),
+      foot: locked ? null : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+        className: "btn-o",
+        onClick: () => setEditRow(r)
+      }, /*#__PURE__*/React.createElement(Ic, {
+        n: "sliders",
+        s: 14
+      }), "Edit"), /*#__PURE__*/React.createElement("button", {
+        className: "btn-o",
+        style: {
+          color: 'var(--red)'
+        },
+        onClick: async () => {
+          if (!confirm('Delete this cashbook entry?')) return;
+          entityDelete('ledger', r.id);
+          await afterMutation();
+          setRec(null);
+          reload();
+        }
+      }, "Delete"))
+    });
+  };
+  return /*#__PURE__*/React.createElement(Shell, {
+    active: "accounts"
+  }, /*#__PURE__*/React.createElement(PageHead, {
+    title: "Accounts",
+    sub: "Money in, money out & profit"
+  }, /*#__PURE__*/React.createElement(CreateButton, {
+    entity: "ledger",
+    label: "Money in",
+    className: "btn-p",
+    initial: {
+      direction: 'in',
+      category: 'Other income',
+      on: today
+    },
+    onDone: reload
+  }), /*#__PURE__*/React.createElement(CreateButton, {
+    entity: "ledger",
+    label: "Money out",
+    className: "btn-o",
+    initial: {
+      direction: 'out',
+      category: 'Rent',
+      on: today
+    },
+    onDone: reload
+  })), data && /*#__PURE__*/React.createElement(StatRow, null, /*#__PURE__*/React.createElement(Stat, {
+    n: "MONEY IN",
+    v: lakh(data.money_in),
+    s: "collections + other",
+    tone: "up"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    n: "MONEY OUT",
+    v: lakh(data.money_out),
+    s: "purchases + expenses",
+    tone: "dn"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    n: "CASH PROFIT",
+    v: lakh(data.profit),
+    s: data.margin + '% of money in',
+    tone: data.profit >= 0 ? 'up' : 'dn'
+  }), /*#__PURE__*/React.createElement(Stat, {
+    n: "BOOK PROFIT",
+    v: lakh(data.book_profit),
+    s: "billed − purchases − expenses"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "chips"
+  }, [['This month', 'month'], ['All time', 'all']].map(([l, v]) => /*#__PURE__*/React.createElement("span", {
+    key: v,
+    className: 'chip' + (period === v ? ' on' : ''),
+    onClick: () => setPeriod(v)
+  }, l)), [['All entries', null], ['In', 'in'], ['Out', 'out']].map(([l, v]) => /*#__PURE__*/React.createElement("span", {
+    key: l,
+    className: 'chip' + (dir === v ? ' on' : ''),
+    onClick: () => setDir(v)
+  }, l))), data && /*#__PURE__*/React.createElement("div", {
+    className: "panel",
+    style: {
+      padding: 16,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 800,
+      fontSize: 13,
+      marginBottom: 10
+    }
+  }, "Breakdown"), /*#__PURE__*/React.createElement("div", {
+    className: "dwbox"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "drow"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "k"
+  }, "Customer collections"), /*#__PURE__*/React.createElement("span", {
+    className: "v"
+  }, inr(data.collections))), /*#__PURE__*/React.createElement("div", {
+    className: "drow"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "k"
+  }, "Other income"), /*#__PURE__*/React.createElement("span", {
+    className: "v"
+  }, inr(data.other_in))), /*#__PURE__*/React.createElement("div", {
+    className: "drow"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "k"
+  }, "Purchases (received POs)"), /*#__PURE__*/React.createElement("span", {
+    className: "v"
+  }, inr(data.purchases))), /*#__PURE__*/React.createElement("div", {
+    className: "drow"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "k"
+  }, "Operating expenses"), /*#__PURE__*/React.createElement("span", {
+    className: "v"
+  }, inr(data.expenses))), /*#__PURE__*/React.createElement("div", {
+    className: "drow"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "k"
+  }, "Billed (invoices)"), /*#__PURE__*/React.createElement("span", {
+    className: "v"
+  }, inr(data.billed)))), /*#__PURE__*/React.createElement("div", {
+    className: "t2",
+    style: {
+      marginTop: 10
+    }
+  }, "Customer collections come from invoice payments. Supplier spend comes from received purchase orders. Add rent, salary and other cash here.")), /*#__PURE__*/React.createElement("div", {
+    className: "panel"
+  }, loading || !data ? /*#__PURE__*/React.createElement("div", {
+    className: "loading"
+  }, "Loading…") : rows.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "empty"
+  }, "No money movements in this period") : /*#__PURE__*/React.createElement("div", {
+    className: "tscroll"
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "tbl"
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "Date"), /*#__PURE__*/React.createElement("th", null, "Type"), /*#__PURE__*/React.createElement("th", null, "Category"), /*#__PURE__*/React.createElement("th", {
+    className: "desk-only"
+  }, "Party"), /*#__PURE__*/React.createElement("th", {
+    className: "num"
+  }, "Amount"))), /*#__PURE__*/React.createElement("tbody", null, rows.map(r => /*#__PURE__*/React.createElement("tr", {
+    key: String(r.id),
+    onClick: () => open(r)
+  }, /*#__PURE__*/React.createElement("td", null, date(r.on)), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Pill, {
+    t: r.direction === 'in' ? 'green' : 'red',
+    dot: true
+  }, r.direction === 'in' ? 'In' : 'Out')), /*#__PURE__*/React.createElement("td", {
+    className: "t1"
+  }, r.category, /*#__PURE__*/React.createElement("div", {
+    className: "t2"
+  }, r.number || r.note)), /*#__PURE__*/React.createElement("td", {
+    className: "desk-only"
+  }, r.party), /*#__PURE__*/React.createElement("td", {
+    className: "num t1",
+    style: {
+      color: r.direction === 'in' ? 'var(--green)' : 'var(--red)'
+    }
+  }, r.direction === 'in' ? '+' : '−', inr(r.amount)))))))), /*#__PURE__*/React.createElement(Drawer, {
+    rec: rec,
+    onClose: () => setRec(null)
+  }), editRow && /*#__PURE__*/React.createElement(FormModal, {
+    title: "Edit cash entry",
+    submitLabel: "Save Changes",
+    fields: ENTITIES.ledger.fields,
+    initial: entityToInitial('ledger', editRow),
+    onClose: () => setEditRow(null),
+    onSave: async v => {
+      const row = DB.ledger.find(x => x.id === editRow.id);
+      if (row) entityApplyEdit('ledger', row, v);
+      await afterMutation();
+      setEditRow(null);
+      setRec(null);
+      reload();
+    }
+  }));
+}
 const CUST_TYPE = {
   Residential: 'blue',
   Commercial: 'violet',
   Industrial: 'amber'
 };
+const REP_STATUS = {
+  received: ['Received', 'blue'],
+  diagnosing: ['Diagnosing', 'amber'],
+  repairing: ['Repairing', 'violet'],
+  ready: ['Ready', 'green'],
+  delivered: ['Delivered', 'gray']
+};
+const REP_COV = {
+  amc: 'violet',
+  warranty: 'blue',
+  paid: 'gray'
+};
+function repairStatus(status) {
+  return REP_STATUS[status] || ['Unknown', 'gray'];
+}
 function buildTimeline(name) {
   const ev = [];
   DB.quotes.filter(q => q.customer?.name === name).forEach(q => {
@@ -6555,7 +7245,7 @@ function buildTimeline(name) {
       title: `Service ${r.number}`,
       detail: `${r.device} — ${r.issue}`,
       amount: r.charge || 0,
-      tag: REP_STATUS[r.status][0]
+      tag: repairStatus(r.status)[0]
     });
   });
   DB.tickets.filter(t => t.customer?.name === name).forEach(t => {
@@ -6657,6 +7347,7 @@ function Customers() {
     openCustomer(findCust(name), true);
   };
   const openCustomer = (r, keepTab) => {
+    if (!r || !r.name) return;
     if (!keepTab) setTab('timeline');
     const timeline = buildTimeline(r.name);
     const equip = DB.equipment.filter(e => e.customer?.name === r.name);
@@ -6692,6 +7383,7 @@ function Customers() {
       }, "Delete"))
     });
   };
+  useHashOpen(rows, openCustomer, loading);
   return /*#__PURE__*/React.createElement(Shell, {
     active: "customers"
   }, /*#__PURE__*/React.createElement(PageHead, {
@@ -7244,6 +7936,7 @@ function Tickets() {
       sw: 2.4
     }), "Resolve"))
   });
+  useHashOpen(rows, open, loading);
   return /*#__PURE__*/React.createElement(Shell, {
     active: "tickets"
   }, /*#__PURE__*/React.createElement(PageHead, {
@@ -7585,36 +8278,87 @@ function statusOf(p) {
   if (p.reorder_level > 0 && p.stock <= p.reorder_level) return ['Low stock', 'amber'];
   return ['In stock', 'green'];
 }
-function Inventory() {
-  const adjust = async (r, done) => {
-    const v = prompt(`Adjust stock for ${r.name}\nCurrent: ${r.stock}\nEnter change (e.g. 10 = stock in, -3 = stock out):`, '');
-    if (v === null) return;
-    const d = parseInt(v, 10);
-    if (isNaN(d) || d === 0) return;
+function StockAdjust({
+  r,
+  done
+}) {
+  const [qty, setQty] = useState(String(r.stock ?? 0));
+  const save = async e => {
+    e.stopPropagation();
+    const n = parseInt(qty, 10);
+    if (isNaN(n) || n < 0) {
+      alert('Enter a stock quantity of 0 or more.');
+      return;
+    }
     const p = DB.products.find(x => x.id === r.id);
-    if (p) p.stock = Math.max(0, num(p.stock) + d);
+    if (!p) return;
+    p.stock = n;
     await commitChange();
     done();
   };
-  return /*#__PURE__*/React.createElement(TablePage, {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flex: 1,
+      flexWrap: 'wrap'
+    },
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    type: "number",
+    min: 0,
+    value: qty,
+    onChange: e => setQty(e.target.value),
+    style: {
+      width: 100
+    },
+    title: "Set stock quantity"
+  }), /*#__PURE__*/React.createElement("button", {
+    className: "btn-p",
+    style: {
+      justifyContent: 'center'
+    },
+    onClick: save
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "sliders",
+    s: 14
+  }), "Set stock"));
+}
+function Inventory() {
+  const [scan, setScan] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(TablePage, {
     active: "inventory",
     title: "Inventory",
     sub: "Products & stock",
     endpoint: "/products",
     entity: "product",
-    recFoot: (r, done) => /*#__PURE__*/React.createElement("button", {
-      className: "btn-p",
-      style: {
-        flex: 1,
-        justifyContent: 'center'
-      },
-      onClick: () => adjust(r, done)
+    refresh: refresh,
+    actions: /*#__PURE__*/React.createElement("button", {
+      className: "btn-o",
+      onClick: () => setScan(true)
     }, /*#__PURE__*/React.createElement(Ic, {
-      n: "sliders",
+      n: "barcode",
       s: 14
-    }), "Adjust Stock (in / out)"),
+    }), "Scan to add"),
+    recFoot: (r, done) => /*#__PURE__*/React.createElement(StockAdjust, {
+      r: r,
+      done: done
+    }),
+    rowSearch: r => [r.sku, r.name, r.specs, r.category].join(' '),
     chips: [{
       label: 'All'
+    }, {
+      label: 'In stock',
+      value: 'in'
+    }, {
+      label: 'Low',
+      value: 'low'
+    }, {
+      label: 'Out of stock',
+      value: 'out'
     }],
     columns: [{
       key: 'sku',
@@ -7717,7 +8461,10 @@ function Inventory() {
         }, r.track_serials ? 'Yes' : 'No'))))
       };
     }
-  });
+  }), scan && /*#__PURE__*/React.createElement(ScanToAddSerial, {
+    onClose: () => setScan(false),
+    onAdded: () => setRefresh(n => n + 1)
+  }));
 }
 const SER_TONE = {
   in_stock: 'gray',
@@ -7726,13 +8473,175 @@ const SER_TONE = {
   rma: 'amber',
   returned: 'red'
 };
+function ScanToAddSerial({
+  onClose,
+  onAdded
+}) {
+  const names = prodNames();
+  const [product, setProduct] = useState(names[0] || '');
+  const [code, setCode] = useState('');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const [log, setLog] = useState([]);
+  const inp = useRef(null);
+  useEffect(() => {
+    setTimeout(() => inp.current && inp.current.focus(), 50);
+  }, [log.length]);
+  const submit = async raw => {
+    setErr('');
+    setMsg('');
+    const r = addScannedSerial(raw != null ? raw : code, product);
+    if (!r.ok) {
+      setErr(r.error);
+      setCode('');
+      setTimeout(() => inp.current && inp.current.focus(), 30);
+      return;
+    }
+    const ok = await commitChange();
+    if (!ok) {
+      setErr(SAVE_FAIL_MSG);
+      return;
+    }
+    setLog(s => [{
+      sn: r.serial.serial_no,
+      stock: r.product ? r.product.stock : '—'
+    }, ...s].slice(0, 12));
+    setMsg('Added ' + r.serial.serial_no + (r.product ? ' · stock ' + r.product.stock : ''));
+    setCode('');
+    onAdded && onAdded(r);
+    setTimeout(() => inp.current && inp.current.focus(), 30);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    className: "scrim show",
+    style: {
+      zIndex: 60
+    },
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      position: 'fixed',
+      top: '50%',
+      left: '50%',
+      transform: 'translate(-50%,-50%)',
+      width: 460,
+      maxWidth: '94vw',
+      maxHeight: '90vh',
+      overflowY: 'auto',
+      background: 'var(--card)',
+      border: '1px solid var(--ln)',
+      borderRadius: 16,
+      padding: '22px 22px 18px',
+      boxShadow: '0 20px 60px rgba(40,35,20,.22)',
+      zIndex: 61
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 4
+    }
+  }, "Scan to add serial"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: 'var(--mut)',
+      fontWeight: 600,
+      marginBottom: 12,
+      lineHeight: 1.45
+    }
+  }, "Choose the product, click the scan box, then scan with a USB barcode scanner (it types the SN and presses Enter). You can also type and press Enter. Each new SN is saved as in-stock and adds 1 to inventory."), /*#__PURE__*/React.createElement("label", {
+    className: "field-l"
+  }, "Product"), /*#__PURE__*/React.createElement("select", {
+    className: "inp",
+    value: product,
+    onChange: e => setProduct(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Select…"), names.map(n => /*#__PURE__*/React.createElement("option", {
+    key: n,
+    value: n
+  }, n))), /*#__PURE__*/React.createElement("label", {
+    className: "field-l"
+  }, "Scan barcode / serial"), /*#__PURE__*/React.createElement("input", {
+    ref: inp,
+    className: "inp",
+    value: code,
+    autoComplete: "off",
+    autoFocus: true,
+    placeholder: "Waiting for scanner…",
+    onChange: e => setCode(e.target.value),
+    onKeyDown: e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submit(e.target.value);
+      }
+    }
+  }), err && /*#__PURE__*/React.createElement("div", {
+    className: "err",
+    style: {
+      color: 'var(--red)',
+      fontSize: 12,
+      fontWeight: 700,
+      marginTop: 10
+    }
+  }, err), msg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: 'var(--green)',
+      fontSize: 12,
+      fontWeight: 700,
+      marginTop: 10
+    }
+  }, msg), log.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "dwbox",
+    style: {
+      marginTop: 12
+    }
+  }, log.map((x, i) => /*#__PURE__*/React.createElement("div", {
+    className: "drow",
+    key: i
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "k"
+  }, x.sn), /*#__PURE__*/React.createElement("span", {
+    className: "v"
+  }, "stock ", x.stock)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 9,
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-o",
+    style: {
+      flex: 1,
+      justifyContent: 'center'
+    },
+    onClick: onClose
+  }, "Done"), /*#__PURE__*/React.createElement("button", {
+    className: "btn-p",
+    style: {
+      flex: 1,
+      justifyContent: 'center'
+    },
+    onClick: () => submit(code)
+  }, "Add"))));
+}
 function Serials() {
-  return /*#__PURE__*/React.createElement(TablePage, {
+  const [scan, setScan] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(TablePage, {
     active: "serials",
     title: "Serial Tracking",
     sub: "Per-unit serial register",
     endpoint: "/serials",
     entity: "serial",
+    refresh: refresh,
+    actions: /*#__PURE__*/React.createElement("button", {
+      className: "btn-o",
+      onClick: () => setScan(true)
+    }, /*#__PURE__*/React.createElement(Ic, {
+      n: "barcode",
+      s: 14
+    }), "Scan to add"),
     chips: [{
       label: 'All'
     }],
@@ -7779,7 +8688,10 @@ function Serials() {
         }, r.status.replace('_', ' '))], ['Customer', r.customer?.name || '—'], ['Sold on', date(r.sold_on)], ['Warranty end', date(r.warranty_end)]]
       }))
     })
-  });
+  }), scan && /*#__PURE__*/React.createElement(ScanToAddSerial, {
+    onClose: () => setScan(false),
+    onAdded: () => setRefresh(n => n + 1)
+  }));
 }
 function Warranty() {
   const {
@@ -7927,7 +8839,8 @@ const RPT_ICON = {
   inventory: 'box',
   amc: 'check',
   service: 'tag',
-  outstanding: 'alert'
+  outstanding: 'alert',
+  profit: 'wallet'
 };
 function Reports() {
   const {
@@ -8782,18 +9695,6 @@ function Settings() {
 }
 
 /* ---------------- router ---------------- */
-const REP_STATUS = {
-  received: ['Received', 'blue'],
-  diagnosing: ['Diagnosing', 'amber'],
-  repairing: ['Repairing', 'violet'],
-  ready: ['Ready', 'green'],
-  delivered: ['Delivered', 'gray']
-};
-const REP_COV = {
-  amc: 'violet',
-  warranty: 'blue',
-  paid: 'gray'
-};
 function ServiceRepair() {
   const [filter, setFilter] = useState(null);
   const path = '/repairs' + (filter ? '?filter=' + filter : '');
@@ -8836,7 +9737,7 @@ function ServiceRepair() {
     };
   };
   const waRepair = r => {
-    const message = `Hello ${r.customer?.name || ''},\n\nUpdate on your repair ${r.number} — ${r.device}.\nStatus: ${REP_STATUS[r.status][0]}${r.charge ? ', estimate ' + inr(r.charge) : ''}.\n\nRegards,\n${COMPANY.name}\n${COMPANY.phone}`;
+    const message = `Hello ${r.customer?.name || ''},\n\nUpdate on your repair ${r.number} — ${r.device}.\nStatus: ${repairStatus(r.status)[0]}${r.charge ? ', estimate ' + inr(r.charge) : ''}.\n\nRegards,\n${COMPANY.name}\n${COMPANY.phone}`;
     const doc = r.charge ? repairDoc(r, 'quote') : null;
     waOpen(r.customer?.name, message, doc ? {
       kind: 'quote',
@@ -8850,18 +9751,21 @@ function ServiceRepair() {
       const i = order.indexOf(t.status);
       if (i < order.length - 1) t.status = order[i + 1];
       if (t.status === 'delivered' && t.coverage === 'paid' && num(t.charge) > 0 && !t.invoice_number) {
-        const inv = createInvoice({
-          customer: t.customer.name,
-          total: t.charge,
-          dueDays: 7,
-          items: [{
-            id: 1,
-            description: `Repair ${t.number} — ${t.device}${t.serial_no ? ' (' + t.serial_no + ')' : ''}`,
-            amount: t.charge
-          }],
-          note: 'From ' + t.number
-        });
-        t.invoice_number = inv.number;
+        const custName = t.customer?.name;
+        if (custName) {
+          const inv = createInvoice({
+            customer: custName,
+            total: t.charge,
+            dueDays: 7,
+            items: [{
+              id: 1,
+              description: `Repair ${t.number} — ${t.device}${t.serial_no ? ' (' + t.serial_no + ')' : ''}`,
+              amount: t.charge
+            }],
+            note: 'From ' + t.number
+          });
+          if (inv) t.invoice_number = inv.number;
+        }
       }
     }
     await commitChange();
@@ -8878,9 +9782,9 @@ function ServiceRepair() {
       rows: [['Customer', r.customer?.name], ['Device', r.device], ['Serial', r.serial_no || '—'], ['Coverage', /*#__PURE__*/React.createElement(Pill, {
         t: REP_COV[r.coverage]
       }, r.coverage)], ['Received', date(r.received_on)], ['Promised', date(r.promised_on)], ['Technician', r.technician?.name || 'Unassigned'], ['Charge', r.charge ? inr(r.charge) : 'Free (covered)'], ['Invoice', r.invoice_number || '— (billed on delivery)'], ['Status', /*#__PURE__*/React.createElement(Pill, {
-        t: REP_STATUS[r.status][1],
+        t: repairStatus(r.status)[1],
         dot: true
-      }, REP_STATUS[r.status][0])]]
+      }, repairStatus(r.status)[0])]]
     })), /*#__PURE__*/React.createElement(DwSection, {
       label: "Reported problem"
     }, /*#__PURE__*/React.createElement("div", {
@@ -9008,9 +9912,9 @@ function ServiceRepair() {
   }, r.coverage)), /*#__PURE__*/React.createElement("td", {
     className: "num t1"
   }, r.charge ? inr(r.charge) : '—'), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Pill, {
-    t: REP_STATUS[r.status][1],
+    t: repairStatus(r.status)[1],
     dot: true
-  }, REP_STATUS[r.status][0])))))))), /*#__PURE__*/React.createElement(Drawer, {
+  }, repairStatus(r.status)[0])))))))), /*#__PURE__*/React.createElement(Drawer, {
     rec: rec,
     onClose: () => setRec(null)
   }), editRow && /*#__PURE__*/React.createElement(FormModal, {
@@ -9039,6 +9943,7 @@ const ROUTE_MAP = {
   quotes: Quotes,
   invoices: Invoices,
   outstanding: Outstanding,
+  accounts: Accounts,
   customers: Customers,
   jobs: Jobs,
   tickets: Tickets,
@@ -9063,8 +9968,64 @@ function SmartVisionApp() {
     if (!isLoggedIn()) window.location.replace('./index.html');
   }, []);
   if (!isLoggedIn()) return null;
-  const path = pathname.replace(/^\//, '');
+  const path = routeKey(pathname);
   const Cmp = ROUTE_MAP[path] || Dashboard;
   return /*#__PURE__*/React.createElement(Cmp, null);
 }
-window.SmartVisionApp = SmartVisionApp;
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      err: null
+    };
+  }
+  static getDerivedStateFromError(err) {
+    return {
+      err: err || true
+    };
+  }
+  render() {
+    if (this.state.err) {
+      return /*#__PURE__*/React.createElement("div", {
+        style: {
+          padding: 32,
+          fontFamily: 'system-ui, sans-serif',
+          maxWidth: 480
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontWeight: 800,
+          fontSize: 18,
+          marginBottom: 8
+        }
+      }, "Something went wrong"), /*#__PURE__*/React.createElement("div", {
+        style: {
+          color: '#666',
+          fontSize: 13,
+          lineHeight: 1.45,
+          marginBottom: 16
+        }
+      }, "The last screen hit an error. Your data is still on disk — reload to continue."), /*#__PURE__*/React.createElement("button", {
+        type: "button",
+        className: "btn-p",
+        onClick: () => window.location.reload()
+      }, "Reload"));
+    }
+    return this.props.children;
+  }
+}
+function AppRoot() {
+  const [ready, setReady] = useState(bootReady);
+  useEffect(() => {
+    if (ready) return;
+    bootPromise.then(() => setReady(true)).catch(() => setReady(true));
+  }, [ready]);
+  if (!ready) return /*#__PURE__*/React.createElement("div", {
+    className: "loading",
+    style: {
+      padding: 40
+    }
+  }, "Loading…");
+  return /*#__PURE__*/React.createElement(AppErrorBoundary, null, /*#__PURE__*/React.createElement(SmartVisionApp, null));
+}
+window.SmartVisionApp = AppRoot;

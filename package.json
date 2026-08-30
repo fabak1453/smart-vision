@@ -1,7 +1,7 @@
 {
   "name": "smart-vision-erp",
   "productName": "Smart Vision ERP",
-  "version": "9.3.2",
+  "version": "9.4.2",
   "private": true,
   "description": "Smart Vision Enterprise \u2014 CCTV ERP (Windows desktop, SQLite)",
   "main": "electron/main.js",
@@ -10,7 +10,7 @@
     "prepare-app": "node scripts/prepare-app.js",
     "start": "npm run prepare-app && electron .",
     "postinstall": "electron-builder install-app-deps",
-    "dist": "npm run prepare-app && electron-builder install-app-deps --platform win32 --arch x64 && electron-builder --win",
+    "dist": "CSC_IDENTITY_AUTO_DISCOVERY=false npm run prepare-app && electron-builder install-app-deps --platform win32 --arch x64 && electron-builder --win --x64",
     "dist:win": "npm run dist"
   },
   "dependencies": {
@@ -46,9 +46,16 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
@@ -57,6 +64,9 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Smart Vision ERP",
       "artifactName": "Smart Vision ERP Setup ${version}.exe"
+    },
+    "portable": {
+      "artifactName": "Smart Vision ERP ${version} Portable.exe"
     }
   }
 }

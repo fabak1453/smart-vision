@@ -51,9 +51,23 @@ function handle(req, res, appDir) {
 
   function readBody(request, response, onEnd) {
     let body = '';
-    request.on('data', (c) => { body += c; if (body.length > 50 * 1024 * 1024) request.destroy(); });
-    request.on('end', () => onEnd(body));
+    let tooBig = false;
+    request.on('data', (c) => {
+      if (tooBig) return;
+      body += c;
+      if (body.length > 50 * 1024 * 1024) {
+        tooBig = true;
+        body = '';
+        try {
+          response.writeHead(413, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify({ error: 'payload too large' }));
+        } catch (e) { /* already closed */ }
+        request.destroy();
+      }
+    });
+    request.on('end', () => { if (!tooBig) onEnd(body); });
     request.on('error', () => {
+      if (tooBig) return;
       response.writeHead(500, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ error: 'read error' }));
     });
@@ -66,9 +80,7 @@ function handle(req, res, appDir) {
       return res.end(store.loadState());
     }
     if (req.method === 'POST') {
-      let body = '';
-      req.on('data', (c) => { body += c; if (body.length > 50 * 1024 * 1024) req.destroy(); });
-      req.on('end', () => {
+      return readBody(req, res, (body) => {
         try {
           store.saveState(body || 'null');
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -78,7 +90,6 @@ function handle(req, res, appDir) {
           res.end(JSON.stringify({ error: 'invalid json' }));
         }
       });
-      return;
     }
     res.writeHead(405, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ error: 'method not allowed' }));
@@ -104,20 +115,27 @@ function handle(req, res, appDir) {
       res.writeHead(405, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'method not allowed' }));
     }
-    let body = '';
-    req.on('data', (c) => { body += c; if (body.length > 50 * 1024 * 1024) req.destroy(); });
-    req.on('end', () => {
+    return readBody(req, res, (body) => {
       try {
-        const { state, counts } = csvToState(body);
-        store.saveState(JSON.stringify(state));
+        const parsed = csvToState(body);
+        let existing = {};
+        try { existing = JSON.parse(store.loadState() || '{}'); } catch (e) { existing = {}; }
+        const present = new Set(parsed.sections || Object.keys((parsed.state && parsed.state.DB) || {}));
+        if (Array.isArray(parsed.state && parsed.state.TEAM)) present.add('team');
+        const edb = (existing && existing.DB) || {};
+        const omitted = Object.keys(edb).filter((k) => Array.isArray(edb[k]) && edb[k].length && !present.has(k));
+        if (omitted.length) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Incomplete backup (missing ## ' + omitted.join(', ## ') + '). Restore cancelled so live data is not wiped.' }));
+        }
+        store.saveState(JSON.stringify(parsed.state));
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, restored: counts }));
+        res.end(JSON.stringify({ ok: true, restored: parsed.counts }));
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message || 'invalid backup' }));
       }
     });
-    return;
   }
 
   // ---- WhatsApp Web (message + optional PDF document) ----
