@@ -1,15 +1,17 @@
 {
   "name": "smart-vision-erp",
   "productName": "Smart Vision ERP",
-  "version": "9.4.2",
+  "version": "9.5.0",
   "private": true,
-  "description": "Smart Vision Enterprise \u2014 CCTV ERP (Windows desktop, SQLite)",
+  "description": "Smart Vision Enterprise — CCTV ERP (Windows desktop, SQLite)",
   "main": "electron/main.js",
   "author": "Smart Vision Enterprise",
   "scripts": {
     "prepare-app": "node scripts/prepare-app.js",
     "start": "npm run prepare-app && electron .",
     "postinstall": "electron-builder install-app-deps",
+    "test": "npm run prepare-app && node test-wiring.js && node test-reliability.js && node test-sync-merge.js",
+    "apk:sync": "npm run prepare-app && npm --prefix apk run sync",
     "dist": "CSC_IDENTITY_AUTO_DISCOVERY=false npm run prepare-app && electron-builder install-app-deps --platform win32 --arch x64 && electron-builder --win --x64",
     "dist:win": "npm run dist"
   },
@@ -37,7 +39,10 @@
       "app/**",
       "build/icon.png",
       "package.json",
-      "!keygen/**"
+      "!keygen/**",
+      "!apk/**",
+      "!android/**",
+      "!capacitor.config.json"
     ],
     "win": {
       "target": [

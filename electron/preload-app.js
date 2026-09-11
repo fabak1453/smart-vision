@@ -14,4 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gdriveUpload: (csvText, filename) => ipcRenderer.invoke('gdrive:upload', { csvText, filename }),
   gdriveList: () => ipcRenderer.invoke('gdrive:list'),
   gdriveDownload: (fileId) => ipcRenderer.invoke('gdrive:download', fileId),
+  lanStatus: () => ipcRenderer.invoke('lan:status'),
+  lanEnable: (on) => ipcRenderer.invoke('lan:enable', on),
+  lanRotatePin: () => ipcRenderer.invoke('lan:rotatePin'),
 });

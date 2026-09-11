@@ -20,7 +20,7 @@ const MARKER = MARKER_V2;
 const TABLE_ORDER = [
   'team', 'customers', 'leads', 'quotes', 'invoices', 'jobs', 'tickets', 'amc',
   'products', 'serials', 'equipment', 'credentials', 'purchaseOrders', 'repairs', 'ledger',
-  'catalog', 'company',
+  'stock_moves', 'catalog', 'company',
 ];
 
 const SCHEMAS = {
@@ -40,7 +40,7 @@ const SCHEMAS = {
     lists: { ledgerCategories: 'textList' },
   },
   customers: {
-    cols: ['id', 'name', 'area', 'type', 'contact_name', 'phone', 'sites', 'owner', 'lifetime_value'],
+    cols: ['id', 'name', 'area', 'type', 'contact_name', 'phone', 'sites', 'owner', 'lifetime_value', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.name || '').toLowerCase(),
     refs: { owner: 'obj' },
     nums: ['sites', 'lifetime_value'],
@@ -84,7 +84,7 @@ const SCHEMAS = {
     nums: ['devices', 'value', 'visits_total', 'visits_used'],
   },
   products: {
-    cols: ['id', 'sku', 'name', 'specs', 'category', 'purchase_price', 'sale_price', 'stock', 'reserved', 'reorder_level', 'track_serials'],
+    cols: ['id', 'sku', 'name', 'specs', 'category', 'purchase_price', 'sale_price', 'stock', 'reserved', 'reorder_level', 'track_serials', 'stock_baseline', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.sku || '').toLowerCase(),
     nums: ['purchase_price', 'sale_price', 'stock', 'reserved', 'reorder_level'],
     bools: ['track_serials'],
@@ -121,9 +121,14 @@ const SCHEMAS = {
     nums: ['charge'],
   },
   ledger: {
-    cols: ['id', 'number', 'direction', 'category', 'amount', 'on', 'party', 'note'],
+    cols: ['id', 'number', 'direction', 'category', 'amount', 'on', 'party', 'note', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.number || r.id || ''),
     nums: ['amount'],
+  },
+  stock_moves: {
+    cols: ['id', 'uuid', 'product_uuid', 'qty', 'reason', 'ref', 'at', 'origin_device', 'deleted_at'],
+    key: (r) => String(r.uuid || r.id || ''),
+    nums: ['qty'],
   },
 };
 

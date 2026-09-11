@@ -32,22 +32,132 @@ const MIME = {
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 };
 
+const pairing = require('./pairing');
+const Erp = require('../app/erp-model');
+
+let lanServer = null;
+let appDirRef = null;
+let loopbackPort = null;
+let lanPort = null;
+
+function createAppServer(appDir) {
+  return http.createServer((req, res) => {
+    try { handle(req, res, appDir); }
+    catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'server error' }));
+    }
+  });
+}
+
 function start(appDir) {
+  appDirRef = appDir;
   return new Promise((resolve, reject) => {
-    const server = http.createServer((req, res) => {
-      try { handle(req, res, appDir); }
-      catch (e) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'server error' }));
-      }
+    const server = createAppServer(appDir);
+    server.listen(0, '127.0.0.1', () => {
+      loopbackPort = server.address().port;
+      resolve({ server, port: loopbackPort });
     });
-    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
     server.on('error', reject);
   });
 }
 
+function setLanEnabled(on) {
+  return new Promise((resolve, reject) => {
+    if (!on) {
+      if (lanServer) {
+        try { lanServer.close(); } catch (e) { /* ignore */ }
+        lanServer = null;
+        lanPort = null;
+      }
+      pairing.setEnabled(false);
+      return resolve(pairing.status(loopbackPort));
+    }
+    pairing.setEnabled(true);
+    if (lanServer && lanPort) return resolve(pairing.status(lanPort));
+    lanServer = createAppServer(appDirRef);
+    lanServer.listen(0, '0.0.0.0', () => {
+      lanPort = lanServer.address().port;
+      resolve(pairing.status(lanPort));
+    });
+    lanServer.on('error', reject);
+  });
+}
+
+function json(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(obj));
+}
+
 function handle(req, res, appDir) {
   const urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+  const local = pairing.isLocalAddress(req.socket && req.socket.remoteAddress);
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-SV-PIN, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  if (urlPath.replace(/\/+$/, '').endsWith('/api/pair')) {
+    if (req.method === 'GET') {
+      if (!local) return json(res, 403, { error: 'pairing info is local only' });
+      return json(res, 200, pairing.status(loopbackPort));
+    }
+    if (req.method === 'POST') {
+      return readBody(req, res, (body) => {
+        try {
+          const payload = JSON.parse(body || '{}');
+          const result = pairing.pair(payload.pin, payload.device_id);
+          if (!result.ok) return json(res, 400, { error: result.error });
+          let snapshot = {};
+          try { snapshot = JSON.parse(store.loadState() || '{}'); } catch (e) { snapshot = {}; }
+          Erp.ensureSyncMeta(snapshot, { deviceId: 'shop' });
+          store.saveState(JSON.stringify(snapshot));
+          return json(res, 200, {
+            ok: true,
+            token: result.device.token,
+            device_id: result.device.id,
+            prefix: result.device.prefix,
+            snapshot,
+            revision: snapshot.revision || 0,
+          });
+        } catch (e) {
+          return json(res, 400, { error: 'invalid pair request' });
+        }
+      });
+    }
+    return json(res, 405, { error: 'method not allowed' });
+  }
+
+  if (urlPath.replace(/\/+$/, '').endsWith('/api/sync')) {
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    const auth = pairing.requireAuth(req);
+    if (!auth.ok) return json(res, auth.status || 401, { error: auth.error });
+    if (auth.local && !pairing.findDevice(pairing.tokenFromReq(req))) {
+      return json(res, 401, { error: 'device token required for sync' });
+    }
+    return readBody(req, res, (body) => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        let pc = {};
+        try { pc = JSON.parse(store.loadState() || '{}'); } catch (e) { pc = {}; }
+        Erp.ensureSyncMeta(pc, { deviceId: 'shop' });
+        const base = Number(payload.base_revision);
+        const liveRev = Number(pc.revision) || 0;
+        if (Number.isFinite(base) && liveRev > 0 && base < liveRev) {
+          return json(res, 409, { error: 'stale revision', snapshot: pc, revision: liveRev });
+        }
+        const merged = Erp.applySyncPayload(pc, payload);
+        store.saveState(JSON.stringify(merged));
+        return json(res, 200, { ok: true, snapshot: merged, revision: merged.revision });
+      } catch (e) {
+        return json(res, 400, { error: e.message || 'sync failed' });
+      }
+    });
+  }
 
   function readBody(request, response, onEnd) {
     let body = '';
@@ -75,6 +185,11 @@ function handle(req, res, appDir) {
 
   // ---- data API (same contract as api.php / server.py / Netlify fn) ----
   if (urlPath.replace(/\/+$/, '').endsWith('/api.php')) {
+    if (!local) {
+      const auth = pairing.requireAuth(req);
+      if (!auth.ok) return json(res, auth.status || 401, { error: auth.error || 'Unauthorized' });
+      if (req.method === 'POST') return json(res, 403, { error: 'full snapshot POST is not allowed from the phone — use /api/sync' });
+    }
     if (req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(store.loadState());
@@ -101,6 +216,8 @@ function handle(req, res, appDir) {
       res.writeHead(405, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'method not allowed' }));
     }
+    const csvAuth = pairing.requireCsvPin(req);
+    if (!csvAuth.ok) return json(res, csvAuth.status || 401, { error: csvAuth.error });
     let state = {};
     try { state = JSON.parse(store.loadState() || '{}'); } catch (e) { state = {}; }
     const csv = stateToCsv(state);
@@ -115,6 +232,8 @@ function handle(req, res, appDir) {
       res.writeHead(405, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'method not allowed' }));
     }
+    const csvAuth = pairing.requireCsvPin(req);
+    if (!csvAuth.ok) return json(res, csvAuth.status || 401, { error: csvAuth.error });
     return readBody(req, res, (body) => {
       try {
         const parsed = csvToState(body);
@@ -203,4 +322,4 @@ function handle(req, res, appDir) {
   });
 }
 
-module.exports = { start };
+module.exports = { start, setLanEnabled, pairingStatus: () => pairing.status(lanPort || loopbackPort) };

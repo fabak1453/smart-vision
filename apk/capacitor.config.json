@@ -1,0 +1,12 @@
+{
+  "appId": "com.smartvision.erp",
+  "appName": "Smart Vision ERP",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true,
+    "path": "android"
+  }
+}

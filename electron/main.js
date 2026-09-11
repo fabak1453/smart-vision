@@ -23,6 +23,7 @@ const store = require('./db');
 const localServer = require('./server');
 const savedLogin = require('./saved-login');
 const googleDrive = require('./google-drive');
+const pairing = require('./pairing');
 
 let mainWin = null;
 let licWin = null;
@@ -262,6 +263,19 @@ ipcMain.handle('gdrive:download', async (_e, fileId) => {
   try { return await googleDrive.downloadBackup(fileId); } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 
+ipcMain.handle('lan:status', async () => {
+  try { return localServer.pairingStatus(); } catch (e) { return { enabled: false, pin: '', urls: [], devices: [] }; }
+});
+ipcMain.handle('lan:enable', async (_e, on) => {
+  try { return await localServer.setLanEnabled(!!on); } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+ipcMain.handle('lan:rotatePin', async () => {
+  try {
+    pairing.newPin();
+    return localServer.pairingStatus();
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+
 ipcMain.handle('whatsapp:open', async (_e, payload) => {
   let savedPath = null;
   const whatsappWebUrl = payload && payload.whatsappWebUrl;
@@ -353,6 +367,7 @@ if (gotLock) {
       license.init(userData);
       savedLogin.init(userData);
       googleDrive.init(userData, path.join(__dirname, 'google-oauth.json'));
+      pairing.init(userData);
       buildMenu();
       const st = license.check();
       if (st.mode === 'trial' || st.mode === 'licensed') await openMain(st);

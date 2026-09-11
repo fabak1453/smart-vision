@@ -3,3 +3,5 @@ dist/
 .DS_Store
 *.log
 build/certs/
+apk/node_modules/
+apk/www/

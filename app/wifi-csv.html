@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CSV sync — Smart Vision ERP</title>
+<style>
+  :root { --a:#0f8a6d; --ink:#23282e; --mut:#8b8577; --ln:#eae7df; --field:#f6f4ee; --red:#c0392b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #faf9f6; color: var(--ink); padding: 20px 16px 40px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { color: var(--mut); font-weight: 600; line-height: 1.45; }
+  label { display: block; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--mut); margin: 16px 0 8px; }
+  input[type=text], input[type=password] { width: 100%; font-size: 20px; letter-spacing: .12em; padding: 14px; border-radius: 12px; border: 1px solid var(--ln); background: #fff; }
+  .btn { width: 100%; border: 0; border-radius: 12px; padding: 16px; font-size: 17px; font-weight: 800; margin-top: 12px; }
+  .btn-p { background: var(--a); color: #fff; }
+  .btn-o { background: #fff; color: var(--ink); border: 1px solid var(--ln); }
+  .msg { margin-top: 14px; font-weight: 700; font-size: 14px; }
+  .err { color: var(--red); }
+  .ok { color: var(--a); }
+</style>
+</head>
+<body>
+  <h1>CSV sync</h1>
+  <p>Same Wi-Fi as the shop PC. Enter the PIN from <b>Settings → Phone &amp; Samsung tablet</b> on the PC. Download the latest backup, or send a CSV back to the PC (replaces shop data).</p>
+  <label for="pin">PIN</label>
+  <input id="pin" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit PIN">
+  <button class="btn btn-p" type="button" id="dl">Download CSV to this phone / tablet</button>
+  <button class="btn btn-o" type="button" id="up">Send CSV to shop PC</button>
+  <input id="file" type="file" accept=".csv,text/csv" hidden>
+  <div class="msg" id="msg"></div>
+<script>
+(function () {
+  var msg = document.getElementById('msg');
+  function pin() { return (document.getElementById('pin').value || '').trim(); }
+  function show(t, ok) { msg.className = 'msg ' + (ok ? 'ok' : 'err'); msg.textContent = t; }
+  document.getElementById('dl').onclick = function () {
+    var p = pin();
+    if (!p) { show('Enter the PIN from the shop PC.'); return; }
+    window.location.href = './backup/export?pin=' + encodeURIComponent(p);
+  };
+  document.getElementById('up').onclick = function () {
+    if (!pin()) { show('Enter the PIN from the shop PC.'); return; }
+    document.getElementById('file').click();
+  };
+  document.getElementById('file').onchange = function () {
+    var f = this.files && this.files[0];
+    this.value = '';
+    if (!f) return;
+    if (!confirm('This REPLACES all data on the shop PC with this CSV. Continue?')) return;
+    show('Sending…', true);
+    f.text().then(function (text) {
+      return fetch('./backup/import?pin=' + encodeURIComponent(pin()), {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/csv; charset=utf-8', 'X-SV-PIN': pin() },
+        body: text
+      });
+    }).then(function (res) { return res.json().then(function (j) { return { res: res, j: j }; }); })
+      .then(function (x) {
+        if (!x.res.ok) { show(x.j.error || 'Upload failed'); return; }
+        show('Sent to shop PC. Open Smart Vision ERP on the PC and confirm the data.', true);
+      }).catch(function (e) { show(e.message || 'Upload failed'); });
+  };
+})();
+</script>
+</body>
+</html>

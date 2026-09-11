@@ -7,6 +7,7 @@ const os = require('os');
 
 const appJs = path.join(__dirname, 'app', 'smart-vision-app.js');
 const backupJs = path.join(__dirname, 'app', 'backup-csv.js');
+const modelJs = path.join(__dirname, 'app', 'erp-model.js');
 let fetchImpl = async () => ({ ok: false, status: 500 });
 const store = {};
 const noop = () => {};
@@ -41,6 +42,7 @@ sandbox.window = Object.assign(sandbox, { location: { hash: '' }, addEventListen
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(backupJs, 'utf8'), sandbox, { filename: 'backup-csv.js' });
+vm.runInContext(fs.readFileSync(modelJs, 'utf8'), sandbox, { filename: 'erp-model.js' });
 vm.runInContext(code, sandbox, { filename: 'app.js' });
 const T = sandbox.__T;
 const findings = [];

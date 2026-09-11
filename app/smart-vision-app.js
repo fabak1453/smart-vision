@@ -113,9 +113,44 @@ const iso = days => {
   d.setDate(d.getDate() + days);
   return d.toISOString();
 };
-const O = name => ({
+const O = name => typeof name === 'object' && name ? name : {
   name
-});
+};
+const Erp = typeof globalThis !== 'undefined' && globalThis.SV_ERP || null;
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem('sv_device_id');
+    if (!id) {
+      id = Erp && Erp.newUuid() || 'dev-' + Date.now();
+      localStorage.setItem('sv_device_id', id);
+    }
+    return id;
+  } catch (e) {
+    return 'desktop';
+  }
+}
+function getNumberPrefix() {
+  try {
+    return localStorage.getItem('sv_number_prefix') || '';
+  } catch (e) {
+    return '';
+  }
+}
+function getPairing() {
+  try {
+    return JSON.parse(localStorage.getItem('sv_pairing') || 'null');
+  } catch (e) {
+    return null;
+  }
+}
+function setPairing(p) {
+  try {
+    if (!p) localStorage.removeItem('sv_pairing');else localStorage.setItem('sv_pairing', JSON.stringify(p));
+  } catch (e) {/* ignore */}
+}
+function isApkShell() {
+  return typeof window !== 'undefined' && !!(window.Capacitor || window.SV_APK);
+}
 const DB = {
   customers: [{
     id: 1,
@@ -1167,7 +1202,8 @@ const DB = {
     on: iso(-3),
     party: 'Scrap buyer',
     note: 'Old camera scrap'
-  }]
+  }],
+  stock_moves: []
 };
 
 /* ---------------- derived report payloads ---------------- */
@@ -2062,18 +2098,34 @@ function applyState(s, present) {
   }
   if (Array.isArray(s.CATALOG) && (!present || present.has('catalog'))) applyCatalog(s.CATALOG);
   if (s.COMPANY && (!present || present.has('company'))) applyCompany(s.COMPANY);
+  if (s.revision != null) currentRevision = Number(s.revision) || 0;
   ensureTeamLoginDefaults();
+  if (Erp) Erp.ensureSyncMeta({
+    DB,
+    TEAM,
+    CATALOG,
+    COMPANY
+  }, {
+    deviceId: getDeviceId()
+  });
 }
+let currentRevision = 0;
 function snapshotState() {
-  return {
+  const snap = {
     DB,
     TEAM,
     CATALOG,
     COMPANY: {
       ...COMPANY
     },
-    savedAt: Date.now()
+    savedAt: Date.now(),
+    revision: currentRevision,
+    device_id: getDeviceId()
   };
+  if (Erp) Erp.ensureSyncMeta(snap, {
+    deviceId: getDeviceId()
+  });
+  return snap;
 }
 let lastSaved = '';
 let persistQueue = Promise.resolve();
@@ -2095,7 +2147,7 @@ async function persistStateNow() {
   } catch (e) {
     localOk = false;
   }
-  if (!serverOK) {
+  if (!serverOK || getPairing()) {
     if (localOk) markSaved(payload);
     return localOk;
   }
@@ -2125,7 +2177,7 @@ function writeStateSync() {
   try {
     localStorage.setItem(PERSIST_KEY, payload);
   } catch (e) {/* ignore */}
-  if (serverOK) {
+  if (serverOK && !getPairing()) {
     try {
       fetch(API_URL, {
         method: 'POST',
@@ -2139,6 +2191,98 @@ function writeStateSync() {
     return;
   }
   markSaved(payload);
+}
+function pairingAuthHeaders(p) {
+  const pair = p || getPairing();
+  if (!pair || !pair.token) return {};
+  return {
+    Authorization: 'Bearer ' + pair.token,
+    'Content-Type': 'application/json'
+  };
+}
+function shopUrl(path) {
+  const pair = getPairing();
+  const base = pair && pair.url || (typeof window !== 'undefined' ? window.location.origin : '');
+  return String(base).replace(/\/+$/, '') + path;
+}
+async function pairWithShop({
+  url,
+  pin
+}) {
+  const base = String(url || '').trim().replace(/\/+$/, '');
+  const res = await fetch(base + '/api/pair', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      pin: String(pin || '').trim(),
+      device_id: getDeviceId()
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Pairing failed');
+  setPairing({
+    url: base,
+    token: data.token,
+    prefix: data.prefix,
+    device_id: data.device_id
+  });
+  try {
+    localStorage.setItem('sv_number_prefix', data.prefix || '');
+    if (data.device_id) localStorage.setItem('sv_device_id', data.device_id);
+  } catch (e) {/* ignore */}
+  if (data.snapshot) {
+    applyState(data.snapshot);
+    currentRevision = num(data.snapshot.revision);
+    lastSaved = '';
+    await persistStateNow();
+  }
+  return data;
+}
+async function syncWithShop() {
+  const pair = getPairing();
+  if (!pair || !Erp) throw new Error('Not paired with a shop PC.');
+  await persistStateNow();
+  const local = snapshotState();
+  const body = Erp.collectPending(local, currentRevision);
+  body.deletes = pendingDeletes.slice();
+  body.device_id = getDeviceId();
+  body.base_revision = currentRevision;
+  const post = async payload => fetch(shopUrl('/api/sync'), {
+    method: 'POST',
+    headers: pairingAuthHeaders(pair),
+    body: JSON.stringify(payload)
+  });
+  let res = await post(body);
+  let data = await res.json().catch(() => ({}));
+  if (res.status === 409 && data.snapshot) {
+    const retry = Erp.localOnlyPayload(data.snapshot, local);
+    retry.deletes = pendingDeletes.slice();
+    retry.device_id = getDeviceId();
+    retry.base_revision = num(data.snapshot.revision);
+    applyState(Erp.rebaseLocal(data.snapshot, local));
+    res = await post(retry);
+    data = await res.json().catch(() => ({}));
+  }
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Sync failed');
+  if (data.snapshot) {
+    applyState(data.snapshot);
+    currentRevision = num(data.snapshot.revision);
+  } else if (data.revision != null) currentRevision = num(data.revision);
+  pendingDeletes.length = 0;
+  lastSaved = '';
+  await persistStateNow();
+  try {
+    localStorage.setItem('sv_last_sync', new Date().toISOString());
+  } catch (e) {/* ignore */}
+  return data;
+}
+async function unpairShop() {
+  setPairing(null);
+  try {
+    localStorage.removeItem('sv_number_prefix');
+  } catch (e) {/* ignore */}
 }
 function tableCount(state, key) {
   const rows = state && state.DB && state.DB[key];
@@ -2312,7 +2456,7 @@ async function importBackupCsv(text) {
   if (Array.isArray(newTeam)) present.add('team');
   if (newCatalog) present.add('catalog');
   if (newCompany) present.add('company');
-  const omitted = Object.keys(DB).filter(k => Array.isArray(DB[k]) && DB[k].length > 0 && !present.has(k));
+  const omitted = Object.keys(DB).filter(k => k !== 'stock_moves' && Array.isArray(DB[k]) && DB[k].length > 0 && !present.has(k));
   if (omitted.length) {
     throw new Error('Incomplete backup (missing ## ' + omitted.join(', ## ') + '). Restore cancelled so live data is not wiped.');
   }
@@ -2354,16 +2498,44 @@ async function downloadBackupCsv(csvText, filename) {
   URL.revokeObjectURL(url);
   return null;
 }
-const nextId = arr => arr.reduce((m, x) => Math.max(m, x.id || 0), 0) + 1;
+const nextId = arr => Erp ? Erp.nextId(arr) : arr.reduce((m, x) => Math.max(m, x.id || 0), 0) + 1;
 const num = v => Number(v) || 0;
-// v5: collision-proof numbering — scans existing numbers instead of using array length
+const touch = row => Erp ? Erp.stampRow(row, getDeviceId()) : row;
 const genNum = (prefix, arr, base) => {
+  if (Erp) return Erp.genNum(prefix, arr, base, getNumberPrefix());
   const mx = arr.reduce((m, x) => {
     const n = parseInt(String(x.number || '').replace(/^\D+/, ''), 10);
     return isNaN(n) ? m : Math.max(m, n);
   }, base);
   return prefix + (mx + 1);
 };
+function recordStockMove(product, qty, reason, ref) {
+  if (!qty) return;
+  if (Erp) {
+    Erp.appendStockMove({
+      DB,
+      TEAM,
+      CATALOG,
+      COMPANY
+    }, {
+      product,
+      qty,
+      reason,
+      ref,
+      deviceId: getDeviceId()
+    });
+    Erp.recomputeStock({
+      DB,
+      TEAM,
+      CATALOG,
+      COMPANY
+    });
+    const live = (DB.products || []).find(x => x === product || product && (x.uuid && x.uuid === product.uuid || x.id && x.id === product.id || x.sku && x.sku === product.sku));
+    if (live && product && product !== live) product.stock = live.stock;
+    return;
+  }
+  if (product) product.stock = Math.max(0, num(product.stock) + qty);
+}
 
 /* ================== v5: cross-module wiring helpers ================== */
 // Lifetime value = total billed to the customer. Bumped on every invoice.
@@ -2447,7 +2619,7 @@ function issueStockFromLines(lines, {
     if (!p) return;
     if (p.track_serials) return;
     if (!allowNegative && num(p.stock) < qty) return;
-    p.stock = Math.max(0, num(p.stock) - qty);
+    recordStockMove(p, -qty, 'issue', '');
   });
   return warnings;
 }
@@ -2485,6 +2657,8 @@ function createInvoice({
     issueStockFromLines(normItems);
     if (pre.warnings.length) inv.stock_note = pre.warnings.join('; ');
   }
+  touch(inv);
+  (inv.items || []).forEach(it => touch(it));
   DB.invoices.push(inv);
   bumpLTV(customer, t);
   if (persist) afterMutation();
@@ -2505,7 +2679,7 @@ function healAcceptedQuoteLinks() {
 // Lead won → make sure the customer exists in the Customers module.
 function ensureCustomer(lead) {
   if (!lead || DB.customers.some(c => c.name === lead.name)) return;
-  DB.customers.push({
+  const row = {
     id: nextId(DB.customers),
     name: lead.name,
     area: '',
@@ -2515,11 +2689,17 @@ function ensureCustomer(lead) {
     sites: 1,
     owner: O(lead.owner?.name || teamNames()[0]),
     lifetime_value: 0
-  });
+  };
+  touch(row);
+  DB.customers.push(row);
 }
 // Accepted quote → invoice + installation job + mark lead as Won (once).
 function convertQuote(q) {
   if (!q || q.converted || q.status !== 'accepted') return false;
+  if (q.invoice_number) {
+    q.converted = true;
+    return false;
+  }
   const custName = q.customer?.name;
   if (!custName) return false;
   q.converted = true;
@@ -2558,8 +2738,10 @@ function convertQuote(q) {
     status: 'unassigned',
     checklist: []
   };
+  touch(job);
   DB.jobs.push(job);
   q.job_number = job.number;
+  touch(q);
   afterMutation();
   return true;
 }
@@ -2570,8 +2752,11 @@ function receivePO(po) {
   if (!po.received_on) po.received_on = iso(0);
   (po.items || []).forEach(it => {
     const p = DB.products.find(x => x.name === it.description);
-    if (p) p.stock = num(p.stock) + num(it.qty);
+    if (p) {
+      recordStockMove(p, num(it.qty), 'receive', po.number);
+    }
   });
+  touch(po);
   afterMutation();
 }
 // Live derived statuses — recomputed from dates on every read so nothing
@@ -2822,6 +3007,12 @@ async function waSend({
       return;
     }
     const pdfFullUrl = data.pdfUrl ? window.location.origin + data.pdfUrl : null;
+    const waMe = data.whatsappWebUrl && String(data.whatsappWebUrl).includes('web.whatsapp.com') ? data.whatsappWebUrl.replace('https://web.whatsapp.com/send', 'https://wa.me/' + (data.phone || '')).replace(/phone=\d+&text=/, '') : null;
+    const mobileWa = data.phone ? 'https://wa.me/' + data.phone + '?text=' + encodeURIComponent(message) : data.whatsappWebUrl;
+    if (isApkShell()) {
+      window.open(mobileWa, '_blank', 'noopener,noreferrer');
+      return;
+    }
     if (window.electronAPI && window.electronAPI.whatsappOpen) {
       await window.electronAPI.whatsappOpen({
         whatsappWebUrl: data.whatsappWebUrl,
@@ -3328,7 +3519,7 @@ const ENTITIES = {
       DB.serials.push(s);
       if (s.status === 'sold' || s.status === 'installed') {
         const p = DB.products.find(x => x.name === v.product);
-        if (p && p.stock > 0) p.stock -= 1;
+        if (p && p.stock > 0) recordStockMove(p, -1, 'serial', v.serial_no);
       }
       if (s.status === 'installed' && v.customer && !DB.equipment.some(e => e.serial?.serial_no === v.serial_no)) {
         DB.equipment.push({
@@ -3500,7 +3691,7 @@ const ENTITIES = {
           warranty_end: iso(w)
         });
         const p = DB.products.find(x => x.name === v.name);
-        if (p && p.stock > 0) p.stock -= 1;
+        if (p && p.stock > 0) recordStockMove(p, -1, 'equipment', v.serial_no);
       }
     }
   },
@@ -3617,6 +3808,22 @@ const ENTITIES = {
     }
   }
 };
+(function wrapEntityCreates() {
+  Object.keys(ENTITIES).forEach(k => {
+    const orig = ENTITIES[k].create;
+    ENTITIES[k].create = v => {
+      const lens = {};
+      Object.keys(DB).forEach(t => {
+        if (Array.isArray(DB[t])) lens[t] = DB[t].length;
+      });
+      const r = orig(v);
+      Object.keys(lens).forEach(t => {
+        if (Array.isArray(DB[t]) && DB[t].length > lens[t]) DB[t].slice(lens[t]).forEach(row => touch(row));
+      });
+      return r;
+    };
+  });
+})();
 function addScannedSerial(serialNo, productName) {
   const sn = String(serialNo || '').replace(/[\r\n\t]/g, '').trim();
   if (!sn) return {
@@ -3650,8 +3857,10 @@ function addScannedSerial(serialNo, productName) {
     warranty_end: null
   };
   DB.serials.push(row);
-  p.stock = num(p.stock) + 1;
   p.track_serials = true;
+  recordStockMove(p, 1, 'scan', sn);
+  touch(row);
+  touch(p);
   afterMutation();
   return {
     ok: true,
@@ -3675,11 +3884,22 @@ const ENTITY_STORE = {
   repair: 'repairs',
   ledger: 'ledger'
 };
+const pendingDeletes = [];
 function entityDelete(entity, id) {
   const table = ENTITY_STORE[entity];
   if (!table || !Array.isArray(DB[table])) return false;
   const i = DB[table].findIndex(x => x.id === id);
   if (i < 0) return false;
+  const row = DB[table][i];
+  if (Erp) {
+    Erp.tombstone(row, getDeviceId());
+    pendingDeletes.push({
+      table,
+      uuid: row.uuid,
+      deleted_at: row.deleted_at,
+      updated_at: row.updated_at
+    });
+  }
   DB[table].splice(i, 1);
   afterMutation();
   return true;
@@ -4116,6 +4336,13 @@ function entityApplyEdit(entity, row, v) {
       return;
     }
     if (entity === 'product') {
+      if (Erp) Erp.recomputeStock({
+        DB,
+        TEAM,
+        CATALOG,
+        COMPANY
+      });
+      const prev = num(row.stock);
       Object.assign(row, {
         sku: v.sku,
         name: v.name,
@@ -4123,11 +4350,14 @@ function entityApplyEdit(entity, row, v) {
         category: v.category || row.category,
         purchase_price: num(v.purchase_price),
         sale_price: num(v.sale_price),
-        stock: Math.max(0, num(v.stock)),
         reserved: num(v.reserved),
         reorder_level: num(v.reorder_level),
         track_serials: v.track_serials === 'Yes'
       });
+      const next = Math.max(0, num(v.stock));
+      if (next !== prev) recordStockMove(row, next - prev, 'adjust', row.sku);else row.stock = next;
+      const live = (DB.products || []).find(x => x === row || row.sku && x.sku === row.sku || row.id && x.id === row.id);
+      if (live) row.stock = live.stock;
       return;
     }
     if (entity === 'serial') {
@@ -4217,6 +4447,7 @@ function entityApplyEdit(entity, row, v) {
       return;
     }
   } finally {
+    if (row) touch(row);
     afterMutation();
   }
 }
@@ -4689,7 +4920,14 @@ function Shell({
       color: saveState === 'error' ? 'var(--red)' : 'var(--mut)'
     },
     title: "Database save status"
-  }, saveState === 'saving' ? 'Saving…' : 'Save failed — retry from Settings'), /*#__PURE__*/React.createElement("div", {
+  }, saveState === 'saving' ? 'Saving…' : 'Save failed — retry from Settings'), isApkShell() && !getPairing() && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 800,
+      marginRight: 10,
+      color: 'var(--amber)'
+    }
+  }, "Not synced"), /*#__PURE__*/React.createElement("div", {
     style: {
       position: 'relative'
     }
@@ -8292,7 +8530,12 @@ function StockAdjust({
     }
     const p = DB.products.find(x => x.id === r.id);
     if (!p) return;
-    p.stock = n;
+    const prev = num(p.stock);
+    const delta = n - prev;
+    if (delta) recordStockMove(p, delta, 'adjust', p.sku);else {
+      p.stock = n;
+      touch(p);
+    }
     await commitChange();
     done();
   };
@@ -8549,7 +8792,7 @@ function ScanToAddSerial({
       marginBottom: 12,
       lineHeight: 1.45
     }
-  }, "Choose the product, click the scan box, then scan with a USB barcode scanner (it types the SN and presses Enter). You can also type and press Enter. Each new SN is saved as in-stock and adds 1 to inventory."), /*#__PURE__*/React.createElement("label", {
+  }, "Choose the product, then scan with a USB barcode scanner, the phone camera, or type the serial and press Enter. Each new SN is saved as in-stock and adds 1 to inventory."), /*#__PURE__*/React.createElement("label", {
     className: "field-l"
   }, "Product"), /*#__PURE__*/React.createElement("select", {
     className: "inp",
@@ -8576,7 +8819,29 @@ function ScanToAddSerial({
         submit(e.target.value);
       }
     }
-  }), err && /*#__PURE__*/React.createElement("div", {
+  }), isApkShell() && /*#__PURE__*/React.createElement("button", {
+    className: "btn-o",
+    style: {
+      marginTop: 10,
+      justifyContent: 'center',
+      width: '100%'
+    },
+    onClick: async () => {
+      try {
+        if (window.SV_APK && window.SV_APK.scanBarcode) {
+          const sn = await window.SV_APK.scanBarcode();
+          if (sn) submit(sn);
+        } else {
+          alert('Camera scan is available in the Android app.');
+        }
+      } catch (e) {
+        setErr(e.message || 'Camera scan failed');
+      }
+    }
+  }, /*#__PURE__*/React.createElement(Ic, {
+    n: "camera",
+    s: 14
+  }), "Use camera"), err && /*#__PURE__*/React.createElement("div", {
     className: "err",
     style: {
       color: 'var(--red)',
@@ -9283,6 +9548,348 @@ function CompanyEditor() {
     }
   }, "Saved ✓"))));
 }
+function WifiCsvPanel({
+  busy,
+  setBusy,
+  setMsg,
+  msg
+}) {
+  const hasLan = typeof window !== 'undefined' && window.electronAPI && typeof window.electronAPI.lanStatus === 'function';
+  const [lan, setLan] = useState({
+    enabled: false,
+    pin: '',
+    urls: []
+  });
+  const refreshLan = async () => {
+    if (!hasLan) return;
+    try {
+      const st = await window.electronAPI.lanStatus();
+      if (st) setLan(st);
+    } catch (e) {/* ignore */}
+  };
+  useEffect(() => {
+    refreshLan();
+  }, []);
+  const csvLinks = (lan.urls || []).map(u => u.replace(/\/+$/, '') + '/wifi-csv.html');
+  if (!hasLan) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "panel"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "pah"
+    }, /*#__PURE__*/React.createElement("h3", null, "Phone & Samsung tablet — CSV on Wi-Fi"), /*#__PURE__*/React.createElement("span", {
+      className: "sub"
+    }, "· same network")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        padding: 16,
+        fontSize: 12.5,
+        fontWeight: 700,
+        color: 'var(--ink2)'
+      }
+    }, "This control is in the Windows desktop app. Open Settings there to share CSV with a phone or tablet."));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "panel"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "pah"
+  }, /*#__PURE__*/React.createElement("h3", null, "Phone & Samsung tablet — CSV on Wi-Fi"), /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "· same Wi-Fi as this PC")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 16,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: 'var(--ink2)',
+      fontWeight: 600,
+      lineHeight: 1.5
+    }
+  }, "Keep this ERP open. Put the phone or Samsung tablet on the ", /*#__PURE__*/React.createElement("b", null, "same Wi-Fi"), ", then open the link below in Chrome. Enter the PIN. ", /*#__PURE__*/React.createElement("b", null, "Download CSV"), " pulls a full backup onto the device. ", /*#__PURE__*/React.createElement("b", null, "Send CSV to shop PC"), " restores that file here (replaces live data)."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, lan.enabled ? /*#__PURE__*/React.createElement(React.Fragment, null, "Wi-Fi CSV is on · PIN ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--a-ink)',
+      fontSize: 18
+    }
+  }, lan.pin)) : 'Wi-Fi CSV is off.'), csvLinks.length > 0 && csvLinks.map(link => /*#__PURE__*/React.createElement("div", {
+    key: link,
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      wordBreak: 'break-all',
+      background: 'var(--field)',
+      padding: 12,
+      borderRadius: 10
+    }
+  }, "Open on tablet / phone:", ' ', /*#__PURE__*/React.createElement("a", {
+    href: link,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      color: 'var(--a-ink)'
+    }
+  }, link))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-p",
+    disabled: busy,
+    onClick: async () => {
+      setBusy(true);
+      setMsg('');
+      try {
+        await window.electronAPI.lanEnable(!lan.enabled);
+        await refreshLan();
+        setMsg(lan.enabled ? 'Wi-Fi CSV turned off.' : 'Wi-Fi CSV on — open the link on the phone or Samsung tablet.');
+      } catch (e) {
+        setMsg(e.message || 'Could not toggle Wi-Fi CSV');
+      } finally {
+        setBusy(false);
+      }
+    }
+  }, lan.enabled ? 'Turn off Wi-Fi CSV' : 'Turn on Wi-Fi CSV'), /*#__PURE__*/React.createElement("button", {
+    className: "btn-o",
+    disabled: busy || !lan.enabled,
+    onClick: async () => {
+      setBusy(true);
+      try {
+        await window.electronAPI.lanRotatePin();
+        await refreshLan();
+        setMsg('New PIN generated.');
+      } catch (e) {
+        setMsg(e.message || 'Could not rotate PIN');
+      } finally {
+        setBusy(false);
+      }
+    }
+  }, "New PIN")), msg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700,
+      color: 'var(--a-ink)'
+    }
+  }, msg)));
+}
+function MobileSyncPanel({
+  busy,
+  setBusy,
+  setMsg,
+  msg
+}) {
+  const hasLan = typeof window !== 'undefined' && window.electronAPI && typeof window.electronAPI.lanStatus === 'function';
+  const [lan, setLan] = useState({
+    enabled: false,
+    pin: '',
+    urls: [],
+    devices: []
+  });
+  const [pairUrl, setPairUrl] = useState('');
+  const [pairPin, setPairPin] = useState('');
+  const pair = getPairing();
+  let lastSync = '';
+  try {
+    lastSync = localStorage.getItem('sv_last_sync') || '';
+  } catch (e) {
+    lastSync = '';
+  }
+  const refreshLan = async () => {
+    if (!hasLan) return;
+    try {
+      const st = await window.electronAPI.lanStatus();
+      if (st) setLan(st);
+    } catch (e) {/* ignore */}
+  };
+  useEffect(() => {
+    refreshLan();
+  }, []);
+  const qrText = lan.enabled && lan.urls && lan.urls[0] ? JSON.stringify({
+    url: lan.urls[0],
+    pairingPin: lan.pin,
+    revision: currentRevision
+  }) : '';
+  return /*#__PURE__*/React.createElement("div", {
+    className: "panel"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "pah"
+  }, /*#__PURE__*/React.createElement("h3", null, "Mobile / Android sync"), /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "· offline phone · merge on shop Wi-Fi")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 16,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: 'var(--ink2)',
+      fontWeight: 600,
+      lineHeight: 1.5
+    }
+  }, "Technicians work offline on the APK. When they return to the shop, pair once (PIN) then Sync. The shop PC stays the source of truth. LAN pairing is off until you enable it."), hasLan && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, lan.enabled ? /*#__PURE__*/React.createElement(React.Fragment, null, "LAN pairing on · PIN ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--a-ink)'
+    }
+  }, lan.pin)) : 'LAN pairing is off.'), lan.urls && lan.urls.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: 'var(--mut)'
+    }
+  }, lan.urls.join(' · ')), qrText && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      fontWeight: 600,
+      wordBreak: 'break-all',
+      background: 'var(--field)',
+      padding: 10,
+      borderRadius: 10
+    }
+  }, "Scan or type: ", qrText), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn-p",
+    disabled: busy,
+    onClick: async () => {
+      setBusy(true);
+      setMsg('');
+      try {
+        await window.electronAPI.lanEnable(!lan.enabled);
+        await refreshLan();
+        setMsg(lan.enabled ? 'LAN pairing disabled.' : 'LAN pairing enabled — phones can pair on this Wi-Fi.');
+      } catch (e) {
+        setMsg(e.message || 'Could not toggle LAN');
+      } finally {
+        setBusy(false);
+      }
+    }
+  }, lan.enabled ? 'Disable LAN pairing' : 'Enable LAN pairing'), /*#__PURE__*/React.createElement("button", {
+    className: "btn-o",
+    disabled: busy || !lan.enabled,
+    onClick: async () => {
+      setBusy(true);
+      try {
+        await window.electronAPI.lanRotatePin();
+        await refreshLan();
+        setMsg('New pairing PIN generated.');
+      } catch (e) {
+        setMsg(e.message || 'Could not rotate PIN');
+      } finally {
+        setBusy(false);
+      }
+    }
+  }, "New PIN")), (lan.devices || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, "Paired devices: ", lan.devices.map(d => d.prefix + (d.name ? ' (' + d.name + ')' : '')).join(', '))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, "This device ", pair ? 'is paired' : 'is not paired', getNumberPrefix() ? ' · numbers ' + getNumberPrefix() : '', "."), lastSync && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: 'var(--mut)',
+      fontWeight: 600
+    }
+  }, "Last sync: ", lastSync), !hasLan && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "field-l"
+  }, "Shop PC URL"), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    value: pairUrl,
+    onChange: e => setPairUrl(e.target.value),
+    placeholder: "http://192.168.1.10:port"
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "field-l"
+  }, "PIN"), /*#__PURE__*/React.createElement("input", {
+    className: "inp",
+    value: pairPin,
+    onChange: e => setPairPin(e.target.value),
+    placeholder: "6-digit PIN"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, !hasLan && !pair && /*#__PURE__*/React.createElement("button", {
+    className: "btn-p",
+    disabled: busy,
+    onClick: async () => {
+      setBusy(true);
+      setMsg('');
+      try {
+        let url = pairUrl,
+          pin = pairPin;
+        if (window.SV_APK && window.SV_APK.scanPairingQr) {
+          const scanned = await window.SV_APK.scanPairingQr();
+          if (scanned && scanned.url) {
+            url = scanned.url;
+            pin = scanned.pairingPin || pin;
+          }
+        }
+        await pairWithShop({
+          url,
+          pin
+        });
+        setMsg('Paired. Pull complete — you can work offline.');
+      } catch (e) {
+        setMsg(e.message || 'Pair failed');
+      } finally {
+        setBusy(false);
+      }
+    }
+  }, "Pair with shop PC"), pair && /*#__PURE__*/React.createElement("button", {
+    className: "btn-p",
+    disabled: busy,
+    onClick: async () => {
+      setBusy(true);
+      setMsg('');
+      try {
+        await syncWithShop();
+        setMsg('Synced with shop PC.');
+      } catch (e) {
+        setMsg(e.message || 'Sync failed');
+      } finally {
+        setBusy(false);
+      }
+    }
+  }, "Sync now"), pair && /*#__PURE__*/React.createElement("button", {
+    className: "btn-o",
+    disabled: busy,
+    onClick: () => {
+      unpairShop();
+      setMsg('Unpaired. Local data stays on this device.');
+    }
+  }, "Unpair")), msg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700,
+      color: 'var(--a-ink)'
+    }
+  }, msg)));
+}
 function Settings() {
   const fileRef = useRef();
   const [msg, setMsg] = useState('');
@@ -9510,7 +10117,17 @@ function Settings() {
   }, /*#__PURE__*/React.createElement(PageHead, {
     title: "Settings",
     sub: `Workspace · Smart Vision Enterprise, Borsad · Data: ${saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Save failed — retry from Backup' : 'Saved to disk'}`
-  }), /*#__PURE__*/React.createElement(CompanyEditor, null), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement(CompanyEditor, null), /*#__PURE__*/React.createElement(WifiCsvPanel, {
+    busy: busy,
+    setBusy: setBusy,
+    setMsg: setMsg,
+    msg: msg
+  }), /*#__PURE__*/React.createElement(MobileSyncPanel, {
+    busy: busy,
+    setBusy: setBusy,
+    setMsg: setMsg,
+    msg: msg
+  }), /*#__PURE__*/React.createElement("div", {
     className: "panel"
   }, /*#__PURE__*/React.createElement("div", {
     className: "pah"

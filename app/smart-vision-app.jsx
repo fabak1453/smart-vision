@@ -83,7 +83,33 @@ const date = (d) => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit'
 /* ====================================================================== */
 const TODAY = new Date();
 const iso = (days) => { const d = new Date(TODAY); d.setDate(d.getDate() + days); return d.toISOString(); };
-const O = (name) => ({ name });
+const O = (name) => (typeof name === 'object' && name ? name : { name });
+const Erp = (typeof globalThis !== 'undefined' && globalThis.SV_ERP) || null;
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem('sv_device_id');
+    if (!id) {
+      id = (Erp && Erp.newUuid()) || ('dev-' + Date.now());
+      localStorage.setItem('sv_device_id', id);
+    }
+    return id;
+  } catch (e) { return 'desktop'; }
+}
+function getNumberPrefix() {
+  try { return localStorage.getItem('sv_number_prefix') || ''; } catch (e) { return ''; }
+}
+function getPairing() {
+  try { return JSON.parse(localStorage.getItem('sv_pairing') || 'null'); } catch (e) { return null; }
+}
+function setPairing(p) {
+  try {
+    if (!p) localStorage.removeItem('sv_pairing');
+    else localStorage.setItem('sv_pairing', JSON.stringify(p));
+  } catch (e) { /* ignore */ }
+}
+function isApkShell() {
+  return typeof window !== 'undefined' && !!(window.Capacitor || window.SV_APK);
+}
 
 const DB = {
   customers: [
@@ -218,6 +244,7 @@ const DB = {
     { id: 2, number: 'CB-8002', direction: 'out', category: 'Salary', amount: 25000, on: iso(-5), party: 'Technicians', note: 'Staff salary' },
     { id: 3, number: 'CB-8003', direction: 'in', category: 'Other income', amount: 2500, on: iso(-3), party: 'Scrap buyer', note: 'Old camera scrap' },
   ],
+  stock_moves: [],
 };
 
 /* ---------------- derived report payloads ---------------- */
@@ -639,10 +666,20 @@ function applyState(s, present) {
   }
   if (Array.isArray(s.CATALOG) && (!present || present.has('catalog'))) applyCatalog(s.CATALOG);
   if (s.COMPANY && (!present || present.has('company'))) applyCompany(s.COMPANY);
+  if (s.revision != null) currentRevision = Number(s.revision) || 0;
   ensureTeamLoginDefaults();
+  if (Erp) Erp.ensureSyncMeta({ DB, TEAM, CATALOG, COMPANY }, { deviceId: getDeviceId() });
 }
+let currentRevision = 0;
 function snapshotState() {
-  return { DB, TEAM, CATALOG, COMPANY: { ...COMPANY }, savedAt: Date.now() };
+  const snap = {
+    DB, TEAM, CATALOG, COMPANY: { ...COMPANY },
+    savedAt: Date.now(),
+    revision: currentRevision,
+    device_id: getDeviceId(),
+  };
+  if (Erp) Erp.ensureSyncMeta(snap, { deviceId: getDeviceId() });
+  return snap;
 }
 let lastSaved = '';
 let persistQueue = Promise.resolve();
@@ -654,7 +691,7 @@ async function persistStateNow() {
   if (payload === lastSaved) return true;
   let localOk = true;
   try { localStorage.setItem(PERSIST_KEY, payload); } catch (e) { localOk = false; }
-  if (!serverOK) {
+  if (!serverOK || getPairing()) {
     if (localOk) markSaved(payload);
     return localOk;
   }
@@ -670,7 +707,7 @@ function writeStateSync() {
   try { payload = JSON.stringify(snapshotState()); } catch (e) { return; }
   if (payload === lastSaved) return;
   try { localStorage.setItem(PERSIST_KEY, payload); } catch (e) { /* ignore */ }
-  if (serverOK) {
+  if (serverOK && !getPairing()) {
     try {
       fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true });
     } catch (e) { /* ignore */ }
@@ -678,6 +715,80 @@ function writeStateSync() {
   }
   markSaved(payload);
 }
+
+function pairingAuthHeaders(p) {
+  const pair = p || getPairing();
+  if (!pair || !pair.token) return {};
+  return { Authorization: 'Bearer ' + pair.token, 'Content-Type': 'application/json' };
+}
+function shopUrl(path) {
+  const pair = getPairing();
+  const base = (pair && pair.url) || (typeof window !== 'undefined' ? window.location.origin : '');
+  return String(base).replace(/\/+$/, '') + path;
+}
+async function pairWithShop({ url, pin }) {
+  const base = String(url || '').trim().replace(/\/+$/, '');
+  const res = await fetch(base + '/api/pair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pin: String(pin || '').trim(), device_id: getDeviceId() }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Pairing failed');
+  setPairing({ url: base, token: data.token, prefix: data.prefix, device_id: data.device_id });
+  try {
+    localStorage.setItem('sv_number_prefix', data.prefix || '');
+    if (data.device_id) localStorage.setItem('sv_device_id', data.device_id);
+  } catch (e) { /* ignore */ }
+  if (data.snapshot) {
+    applyState(data.snapshot);
+    currentRevision = num(data.snapshot.revision);
+    lastSaved = '';
+    await persistStateNow();
+  }
+  return data;
+}
+async function syncWithShop() {
+  const pair = getPairing();
+  if (!pair || !Erp) throw new Error('Not paired with a shop PC.');
+  await persistStateNow();
+  const local = snapshotState();
+  const body = Erp.collectPending(local, currentRevision);
+  body.deletes = pendingDeletes.slice();
+  body.device_id = getDeviceId();
+  body.base_revision = currentRevision;
+  const post = async (payload) => fetch(shopUrl('/api/sync'), {
+    method: 'POST',
+    headers: pairingAuthHeaders(pair),
+    body: JSON.stringify(payload),
+  });
+  let res = await post(body);
+  let data = await res.json().catch(() => ({}));
+  if (res.status === 409 && data.snapshot) {
+    const retry = Erp.localOnlyPayload(data.snapshot, local);
+    retry.deletes = pendingDeletes.slice();
+    retry.device_id = getDeviceId();
+    retry.base_revision = num(data.snapshot.revision);
+    applyState(Erp.rebaseLocal(data.snapshot, local));
+    res = await post(retry);
+    data = await res.json().catch(() => ({}));
+  }
+  if (!res.ok || !data.ok) throw new Error(data.error || 'Sync failed');
+  if (data.snapshot) {
+    applyState(data.snapshot);
+    currentRevision = num(data.snapshot.revision);
+  } else if (data.revision != null) currentRevision = num(data.revision);
+  pendingDeletes.length = 0;
+  lastSaved = '';
+  await persistStateNow();
+  try { localStorage.setItem('sv_last_sync', new Date().toISOString()); } catch (e) { /* ignore */ }
+  return data;
+}
+async function unpairShop() {
+  setPairing(null);
+  try { localStorage.removeItem('sv_number_prefix'); } catch (e) { /* ignore */ }
+}
+
 function tableCount(state, key) {
   const rows = state && state.DB && state.DB[key];
   return Array.isArray(rows) ? rows.length : 0;
@@ -809,7 +920,7 @@ async function importBackupCsv(text) {
   if (Array.isArray(newTeam)) present.add('team');
   if (newCatalog) present.add('catalog');
   if (newCompany) present.add('company');
-  const omitted = Object.keys(DB).filter((k) => Array.isArray(DB[k]) && DB[k].length > 0 && !present.has(k));
+  const omitted = Object.keys(DB).filter((k) => k !== 'stock_moves' && Array.isArray(DB[k]) && DB[k].length > 0 && !present.has(k));
   if (omitted.length) {
     throw new Error('Incomplete backup (missing ## ' + omitted.join(', ## ') + '). Restore cancelled so live data is not wiped.');
   }
@@ -844,13 +955,27 @@ async function downloadBackupCsv(csvText, filename) {
   URL.revokeObjectURL(url);
   return null;
 }
-const nextId = (arr) => arr.reduce((m, x) => Math.max(m, x.id || 0), 0) + 1;
+const nextId = (arr) => (Erp ? Erp.nextId(arr) : arr.reduce((m, x) => Math.max(m, x.id || 0), 0) + 1);
 const num = (v) => Number(v) || 0;
-// v5: collision-proof numbering — scans existing numbers instead of using array length
+const touch = (row) => (Erp ? Erp.stampRow(row, getDeviceId()) : row);
 const genNum = (prefix, arr, base) => {
+  if (Erp) return Erp.genNum(prefix, arr, base, getNumberPrefix());
   const mx = arr.reduce((m, x) => { const n = parseInt(String(x.number || '').replace(/^\D+/, ''), 10); return isNaN(n) ? m : Math.max(m, n); }, base);
   return prefix + (mx + 1);
 };
+function recordStockMove(product, qty, reason, ref) {
+  if (!qty) return;
+  if (Erp) {
+    Erp.appendStockMove({ DB, TEAM, CATALOG, COMPANY }, {
+      product, qty, reason, ref, deviceId: getDeviceId(),
+    });
+    Erp.recomputeStock({ DB, TEAM, CATALOG, COMPANY });
+    const live = (DB.products || []).find((x) => x === product || (product && ((x.uuid && x.uuid === product.uuid) || (x.id && x.id === product.id) || (x.sku && x.sku === product.sku))));
+    if (live && product && product !== live) product.stock = live.stock;
+    return;
+  }
+  if (product) product.stock = Math.max(0, num(product.stock) + qty);
+}
 
 /* ================== v5: cross-module wiring helpers ================== */
 // Lifetime value = total billed to the customer. Bumped on every invoice.
@@ -929,7 +1054,7 @@ function issueStockFromLines(lines, { allowNegative = false } = {}) {
     if (!p) return;
     if (p.track_serials) return;
     if (!allowNegative && num(p.stock) < qty) return;
-    p.stock = Math.max(0, num(p.stock) - qty);
+    recordStockMove(p, -qty, 'issue', '');
   });
   return warnings;
 }
@@ -947,6 +1072,8 @@ function createInvoice({ customer, total, dueDays = 15, items = [], note = '', i
     issueStockFromLines(normItems);
     if (pre.warnings.length) inv.stock_note = pre.warnings.join('; ');
   }
+  touch(inv);
+  (inv.items || []).forEach((it) => touch(it));
   DB.invoices.push(inv);
   bumpLTV(customer, t);
   if (persist) afterMutation();
@@ -968,12 +1095,15 @@ function healAcceptedQuoteLinks() {
 // Lead won → make sure the customer exists in the Customers module.
 function ensureCustomer(lead) {
   if (!lead || DB.customers.some((c) => c.name === lead.name)) return;
-  DB.customers.push({ id: nextId(DB.customers), name: lead.name, area: '', type: lead.segment || 'Commercial',
-    contact_name: '', phone: '', sites: 1, owner: O(lead.owner?.name || teamNames()[0]), lifetime_value: 0 });
+  const row = { id: nextId(DB.customers), name: lead.name, area: '', type: lead.segment || 'Commercial',
+    contact_name: '', phone: '', sites: 1, owner: O(lead.owner?.name || teamNames()[0]), lifetime_value: 0 };
+  touch(row);
+  DB.customers.push(row);
 }
 // Accepted quote → invoice + installation job + mark lead as Won (once).
 function convertQuote(q) {
   if (!q || q.converted || q.status !== 'accepted') return false;
+  if (q.invoice_number) { q.converted = true; return false; }
   const custName = q.customer?.name;
   if (!custName) return false;
   q.converted = true;
@@ -989,8 +1119,10 @@ function convertQuote(q) {
   if (inv.stock_note) q.stock_note = inv.stock_note;
   const job = { id: nextId(DB.jobs), number: genNum('JOB-', DB.jobs, 3000), customer: O(custName), type: 'install',
     scope: q.scope || 'Installation per ' + q.number, scheduled_on: iso(3), slot: 'TBD', technician: null, status: 'unassigned', checklist: [] };
+  touch(job);
   DB.jobs.push(job);
   q.job_number = job.number;
+  touch(q);
   afterMutation();
   return true;
 }
@@ -1001,8 +1133,11 @@ function receivePO(po) {
   if (!po.received_on) po.received_on = iso(0);
   (po.items || []).forEach((it) => {
     const p = DB.products.find((x) => x.name === it.description);
-    if (p) p.stock = num(p.stock) + num(it.qty);
+    if (p) {
+      recordStockMove(p, num(it.qty), 'receive', po.number);
+    }
   });
+  touch(po);
   afterMutation();
 }
 // Live derived statuses — recomputed from dates on every read so nothing
@@ -1181,6 +1316,16 @@ async function waSend({ customerName, message, kind, doc }) {
       return;
     }
     const pdfFullUrl = data.pdfUrl ? (window.location.origin + data.pdfUrl) : null;
+    const waMe = data.whatsappWebUrl && String(data.whatsappWebUrl).includes('web.whatsapp.com')
+      ? data.whatsappWebUrl.replace('https://web.whatsapp.com/send', 'https://wa.me/' + (data.phone || '')).replace(/phone=\d+&text=/, '')
+      : null;
+    const mobileWa = data.phone
+      ? ('https://wa.me/' + data.phone + '?text=' + encodeURIComponent(message))
+      : data.whatsappWebUrl;
+    if (isApkShell()) {
+      window.open(mobileWa, '_blank', 'noopener,noreferrer');
+      return;
+    }
     if (window.electronAPI && window.electronAPI.whatsappOpen) {
       await window.electronAPI.whatsappOpen({
         whatsappWebUrl: data.whatsappWebUrl,
@@ -1325,7 +1470,7 @@ const ENTITIES = {
     { key: 'status', label: 'Status', type: 'select', options: ['in_stock', 'sold', 'installed', 'rma', 'returned'], default: 'in_stock' },
     { key: 'customer', label: 'Customer (optional)', type: 'select', options: custNames },
   ], create: (v) => { const s = { id: nextId(DB.serials), serial_no: v.serial_no, product: O(v.product), customer: v.customer ? O(v.customer) : null, status: v.status || 'in_stock', in_warranty: v.status === 'installed', sold_on: v.status === 'installed' ? iso(0) : null, warranty_end: v.status === 'installed' ? iso(730) : null }; DB.serials.push(s);
-    if (s.status === 'sold' || s.status === 'installed') { const p = DB.products.find((x) => x.name === v.product); if (p && p.stock > 0) p.stock -= 1; }
+    if (s.status === 'sold' || s.status === 'installed') { const p = DB.products.find((x) => x.name === v.product); if (p && p.stock > 0) recordStockMove(p, -1, 'serial', v.serial_no); }
     if (s.status === 'installed' && v.customer && !DB.equipment.some((e) => e.serial?.serial_no === v.serial_no)) {
       DB.equipment.push({ id: nextId(DB.equipment), name: v.product, customer: O(v.customer), product: O(v.product), serial: { serial_no: v.serial_no }, location: '—', installed_on: iso(0), warranty_end: iso(730), in_warranty: true });
     } } },
@@ -1355,7 +1500,7 @@ const ENTITIES = {
   ], create: (v) => { const w = num(v.warranty_days) || 365; DB.equipment.push({ id: nextId(DB.equipment), name: v.name, customer: O(v.customer), product: O(v.name), serial: { serial_no: v.serial_no || '—' }, location: v.location, installed_on: iso(-num(v.installed_days_ago)), warranty_end: iso(w), in_warranty: w > 0 });
     if (v.serial_no && !DB.serials.some((s) => s.serial_no === v.serial_no)) {
       DB.serials.push({ id: nextId(DB.serials), serial_no: v.serial_no, product: O(v.name), customer: O(v.customer), status: 'installed', in_warranty: w > 0, sold_on: iso(-num(v.installed_days_ago)), warranty_end: iso(w) });
-      const p = DB.products.find((x) => x.name === v.name); if (p && p.stock > 0) p.stock -= 1;
+      const p = DB.products.find((x) => x.name === v.name); if (p && p.stock > 0) recordStockMove(p, -1, 'equipment', v.serial_no);
     } } },
   repair: { label: 'Repair', fields: [
     { key: 'customer', label: 'Customer', type: 'select', options: custNames },
@@ -1389,6 +1534,21 @@ const ENTITIES = {
   } },
 };
 
+(function wrapEntityCreates() {
+  Object.keys(ENTITIES).forEach((k) => {
+    const orig = ENTITIES[k].create;
+    ENTITIES[k].create = (v) => {
+      const lens = {};
+      Object.keys(DB).forEach((t) => { if (Array.isArray(DB[t])) lens[t] = DB[t].length; });
+      const r = orig(v);
+      Object.keys(lens).forEach((t) => {
+        if (Array.isArray(DB[t]) && DB[t].length > lens[t]) DB[t].slice(lens[t]).forEach((row) => touch(row));
+      });
+      return r;
+    };
+  });
+})();
+
 function addScannedSerial(serialNo, productName) {
   const sn = String(serialNo || '').replace(/[\r\n\t]/g, '').trim();
   if (!sn) return { ok: false, error: 'Empty scan — try again.' };
@@ -1403,8 +1563,9 @@ function addScannedSerial(serialNo, productName) {
     status: 'in_stock', in_warranty: false, sold_on: null, warranty_end: null,
   };
   DB.serials.push(row);
-  p.stock = num(p.stock) + 1;
   p.track_serials = true;
+  recordStockMove(p, 1, 'scan', sn);
+  touch(row); touch(p);
   afterMutation();
   return { ok: true, serial: row, product: p };
 }
@@ -1415,11 +1576,17 @@ const ENTITY_STORE = {
   serial: 'serials', credential: 'credentials', po: 'purchaseOrders',
   equipment: 'equipment', repair: 'repairs', ledger: 'ledger',
 };
+const pendingDeletes = [];
 function entityDelete(entity, id) {
   const table = ENTITY_STORE[entity];
   if (!table || !Array.isArray(DB[table])) return false;
   const i = DB[table].findIndex((x) => x.id === id);
   if (i < 0) return false;
+  const row = DB[table][i];
+  if (Erp) {
+    Erp.tombstone(row, getDeviceId());
+    pendingDeletes.push({ table, uuid: row.uuid, deleted_at: row.deleted_at, updated_at: row.updated_at });
+  }
   DB[table].splice(i, 1);
   afterMutation();
   return true;
@@ -1601,11 +1768,18 @@ function entityApplyEdit(entity, row, v) {
     return;
   }
   if (entity === 'product') {
+    if (Erp) Erp.recomputeStock({ DB, TEAM, CATALOG, COMPANY });
+    const prev = num(row.stock);
     Object.assign(row, {
       sku: v.sku, name: v.name, specs: v.specs, category: v.category || row.category,
-      purchase_price: num(v.purchase_price), sale_price: num(v.sale_price), stock: Math.max(0, num(v.stock)),
+      purchase_price: num(v.purchase_price), sale_price: num(v.sale_price),
       reserved: num(v.reserved), reorder_level: num(v.reorder_level), track_serials: v.track_serials === 'Yes',
     });
+    const next = Math.max(0, num(v.stock));
+    if (next !== prev) recordStockMove(row, next - prev, 'adjust', row.sku);
+    else row.stock = next;
+    const live = (DB.products || []).find((x) => x === row || (row.sku && x.sku === row.sku) || (row.id && x.id === row.id));
+    if (live) row.stock = live.stock;
     return;
   }
   if (entity === 'serial') {
@@ -1667,6 +1841,7 @@ function entityApplyEdit(entity, row, v) {
     return;
   }
   } finally {
+    if (row) touch(row);
     afterMutation();
   }
 }
@@ -1878,6 +2053,9 @@ function Shell({ active, children }) {
             <span style={{ fontSize: 11, fontWeight: 800, marginRight: 10, color: saveState === 'error' ? 'var(--red)' : 'var(--mut)' }} title="Database save status">
               {saveState === 'saving' ? 'Saving…' : 'Save failed — retry from Settings'}
             </span>
+          )}
+          {isApkShell() && !getPairing() && (
+            <span style={{ fontSize: 11, fontWeight: 800, marginRight: 10, color: 'var(--amber)' }}>Not synced</span>
           )}
           <div style={{ position: 'relative' }}>
             <button className="tbic" onClick={() => setNotif((v) => !v)}><Ic n="bell" s={17}/><span className="badge"></span></button>
@@ -3438,7 +3616,10 @@ function StockAdjust({ r, done }) {
     if (isNaN(n) || n < 0) { alert('Enter a stock quantity of 0 or more.'); return; }
     const p = DB.products.find((x) => x.id === r.id);
     if (!p) return;
-    p.stock = n;
+    const prev = num(p.stock);
+    const delta = n - prev;
+    if (delta) recordStockMove(p, delta, 'adjust', p.sku);
+    else { p.stock = n; touch(p); }
     await commitChange();
     done();
   };
@@ -3518,7 +3699,7 @@ function ScanToAddSerial({ onClose, onAdded }) {
       <div onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 460, maxWidth: '94vw', maxHeight: '90vh', overflowY: 'auto', background: 'var(--card)', border: '1px solid var(--ln)', borderRadius: 16, padding: '22px 22px 18px', boxShadow: '0 20px 60px rgba(40,35,20,.22)', zIndex: 61 }}>
         <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>Scan to add serial</div>
         <div style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 600, marginBottom: 12, lineHeight: 1.45 }}>
-          Choose the product, click the scan box, then scan with a USB barcode scanner (it types the SN and presses Enter). You can also type and press Enter. Each new SN is saved as in-stock and adds 1 to inventory.
+          Choose the product, then scan with a USB barcode scanner, the phone camera, or type the serial and press Enter. Each new SN is saved as in-stock and adds 1 to inventory.
         </div>
         <label className="field-l">Product</label>
         <select className="inp" value={product} onChange={(e) => setProduct(e.target.value)}>
@@ -3530,6 +3711,21 @@ function ScanToAddSerial({ onClose, onAdded }) {
           placeholder="Waiting for scanner…"
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(e.target.value); } }}/>
+        {isApkShell() && (
+          <button className="btn-o" style={{ marginTop: 10, justifyContent: 'center', width: '100%' }}
+            onClick={async () => {
+              try {
+                if (window.SV_APK && window.SV_APK.scanBarcode) {
+                  const sn = await window.SV_APK.scanBarcode();
+                  if (sn) submit(sn);
+                } else {
+                  alert('Camera scan is available in the Android app.');
+                }
+              } catch (e) { setErr(e.message || 'Camera scan failed'); }
+            }}>
+            <Ic n="camera" s={14}/>Use camera
+          </button>
+        )}
         {err && <div className="err" style={{ color: 'var(--red)', fontSize: 12, fontWeight: 700, marginTop: 10 }}>{err}</div>}
         {msg && <div style={{ color: 'var(--green)', fontSize: 12, fontWeight: 700, marginTop: 10 }}>{msg}</div>}
         {log.length > 0 && (
@@ -3848,6 +4044,170 @@ function CompanyEditor() {
   );
 }
 
+function WifiCsvPanel({ busy, setBusy, setMsg, msg }) {
+  const hasLan = typeof window !== 'undefined' && window.electronAPI && typeof window.electronAPI.lanStatus === 'function';
+  const [lan, setLan] = useState({ enabled: false, pin: '', urls: [] });
+  const refreshLan = async () => {
+    if (!hasLan) return;
+    try { const st = await window.electronAPI.lanStatus(); if (st) setLan(st); } catch (e) { /* ignore */ }
+  };
+  useEffect(() => { refreshLan(); }, []);
+  const csvLinks = (lan.urls || []).map((u) => u.replace(/\/+$/, '') + '/wifi-csv.html');
+  if (!hasLan) {
+    return (
+      <div className="panel">
+        <div className="pah"><h3>Phone &amp; Samsung tablet — CSV on Wi-Fi</h3><span className="sub">· same network</span></div>
+        <div style={{ padding: 16, fontSize: 12.5, fontWeight: 700, color: 'var(--ink2)' }}>
+          This control is in the Windows desktop app. Open Settings there to share CSV with a phone or tablet.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="panel">
+      <div className="pah"><h3>Phone &amp; Samsung tablet — CSV on Wi-Fi</h3><span className="sub">· same Wi-Fi as this PC</span></div>
+      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 12.5, color: 'var(--ink2)', fontWeight: 600, lineHeight: 1.5 }}>
+          Keep this ERP open. Put the phone or Samsung tablet on the <b>same Wi-Fi</b>, then open the link below in Chrome.
+          Enter the PIN. <b>Download CSV</b> pulls a full backup onto the device. <b>Send CSV to shop PC</b> restores that file here (replaces live data).
+        </div>
+        <div style={{ fontSize: 12.5, fontWeight: 700 }}>
+          {lan.enabled
+            ? <>Wi-Fi CSV is on · PIN <span style={{ color: 'var(--a-ink)', fontSize: 18 }}>{lan.pin}</span></>
+            : 'Wi-Fi CSV is off.'}
+        </div>
+        {csvLinks.length > 0 && csvLinks.map((link) => (
+          <div key={link} style={{ fontSize: 13, fontWeight: 700, wordBreak: 'break-all', background: 'var(--field)', padding: 12, borderRadius: 10 }}>
+            Open on tablet / phone:{' '}
+            <a href={link} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--a-ink)' }}>{link}</a>
+          </div>
+        ))}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button className="btn-p" disabled={busy} onClick={async () => {
+            setBusy(true); setMsg('');
+            try {
+              await window.electronAPI.lanEnable(!lan.enabled);
+              await refreshLan();
+              setMsg(lan.enabled ? 'Wi-Fi CSV turned off.' : 'Wi-Fi CSV on — open the link on the phone or Samsung tablet.');
+            } catch (e) { setMsg(e.message || 'Could not toggle Wi-Fi CSV'); }
+            finally { setBusy(false); }
+          }}>{lan.enabled ? 'Turn off Wi-Fi CSV' : 'Turn on Wi-Fi CSV'}</button>
+          <button className="btn-o" disabled={busy || !lan.enabled} onClick={async () => {
+            setBusy(true);
+            try { await window.electronAPI.lanRotatePin(); await refreshLan(); setMsg('New PIN generated.'); }
+            catch (e) { setMsg(e.message || 'Could not rotate PIN'); }
+            finally { setBusy(false); }
+          }}>New PIN</button>
+        </div>
+        {msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--a-ink)' }}>{msg}</div>}
+      </div>
+    </div>
+  );
+}
+
+function MobileSyncPanel({ busy, setBusy, setMsg, msg }) {
+  const hasLan = typeof window !== 'undefined' && window.electronAPI && typeof window.electronAPI.lanStatus === 'function';
+  const [lan, setLan] = useState({ enabled: false, pin: '', urls: [], devices: [] });
+  const [pairUrl, setPairUrl] = useState('');
+  const [pairPin, setPairPin] = useState('');
+  const pair = getPairing();
+  let lastSync = '';
+  try { lastSync = localStorage.getItem('sv_last_sync') || ''; } catch (e) { lastSync = ''; }
+  const refreshLan = async () => {
+    if (!hasLan) return;
+    try { const st = await window.electronAPI.lanStatus(); if (st) setLan(st); } catch (e) { /* ignore */ }
+  };
+  useEffect(() => { refreshLan(); }, []);
+  const qrText = lan.enabled && lan.urls && lan.urls[0]
+    ? JSON.stringify({ url: lan.urls[0], pairingPin: lan.pin, revision: currentRevision })
+    : '';
+  return (
+    <div className="panel">
+      <div className="pah"><h3>Mobile / Android sync</h3><span className="sub">· offline phone · merge on shop Wi-Fi</span></div>
+      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 12.5, color: 'var(--ink2)', fontWeight: 600, lineHeight: 1.5 }}>
+          Technicians work offline on the APK. When they return to the shop, pair once (PIN) then Sync.
+          The shop PC stays the source of truth. LAN pairing is off until you enable it.
+        </div>
+        {hasLan && (
+          <>
+            <div style={{ fontSize: 12.5, fontWeight: 700 }}>
+              {lan.enabled ? <>LAN pairing on · PIN <span style={{ color: 'var(--a-ink)' }}>{lan.pin}</span></> : 'LAN pairing is off.'}
+            </div>
+            {lan.urls && lan.urls.length > 0 && <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--mut)' }}>{lan.urls.join(' · ')}</div>}
+            {qrText && (
+              <div style={{ fontSize: 11, fontWeight: 600, wordBreak: 'break-all', background: 'var(--field)', padding: 10, borderRadius: 10 }}>
+                Scan or type: {qrText}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <button className="btn-p" disabled={busy} onClick={async () => {
+                setBusy(true); setMsg('');
+                try {
+                  await window.electronAPI.lanEnable(!lan.enabled);
+                  await refreshLan();
+                  setMsg(lan.enabled ? 'LAN pairing disabled.' : 'LAN pairing enabled — phones can pair on this Wi-Fi.');
+                } catch (e) { setMsg(e.message || 'Could not toggle LAN'); }
+                finally { setBusy(false); }
+              }}>{lan.enabled ? 'Disable LAN pairing' : 'Enable LAN pairing'}</button>
+              <button className="btn-o" disabled={busy || !lan.enabled} onClick={async () => {
+                setBusy(true);
+                try { await window.electronAPI.lanRotatePin(); await refreshLan(); setMsg('New pairing PIN generated.'); }
+                catch (e) { setMsg(e.message || 'Could not rotate PIN'); }
+                finally { setBusy(false); }
+              }}>New PIN</button>
+            </div>
+            {(lan.devices || []).length > 0 && (
+              <div style={{ fontSize: 12.5, fontWeight: 700 }}>
+                Paired devices: {lan.devices.map((d) => d.prefix + (d.name ? ' (' + d.name + ')' : '')).join(', ')}
+              </div>
+            )}
+          </>
+        )}
+        <div style={{ fontSize: 12.5, fontWeight: 700 }}>This device {pair ? 'is paired' : 'is not paired'}{getNumberPrefix() ? ' · numbers ' + getNumberPrefix() : ''}.</div>
+        {lastSync && <div style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 600 }}>Last sync: {lastSync}</div>}
+        {!hasLan && (
+          <div>
+            <label className="field-l">Shop PC URL</label>
+            <input className="inp" value={pairUrl} onChange={(e) => setPairUrl(e.target.value)} placeholder="http://192.168.1.10:port"/>
+            <label className="field-l">PIN</label>
+            <input className="inp" value={pairPin} onChange={(e) => setPairPin(e.target.value)} placeholder="6-digit PIN"/>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {!hasLan && !pair && (
+            <button className="btn-p" disabled={busy} onClick={async () => {
+              setBusy(true); setMsg('');
+              try {
+                let url = pairUrl, pin = pairPin;
+                if (window.SV_APK && window.SV_APK.scanPairingQr) {
+                  const scanned = await window.SV_APK.scanPairingQr();
+                  if (scanned && scanned.url) { url = scanned.url; pin = scanned.pairingPin || pin; }
+                }
+                await pairWithShop({ url, pin });
+                setMsg('Paired. Pull complete — you can work offline.');
+              } catch (e) { setMsg(e.message || 'Pair failed'); }
+              finally { setBusy(false); }
+            }}>Pair with shop PC</button>
+          )}
+          {pair && (
+            <button className="btn-p" disabled={busy} onClick={async () => {
+              setBusy(true); setMsg('');
+              try { await syncWithShop(); setMsg('Synced with shop PC.'); }
+              catch (e) { setMsg(e.message || 'Sync failed'); }
+              finally { setBusy(false); }
+            }}>Sync now</button>
+          )}
+          {pair && (
+            <button className="btn-o" disabled={busy} onClick={() => { unpairShop(); setMsg('Unpaired. Local data stays on this device.'); }}>Unpair</button>
+          )}
+        </div>
+        {msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--a-ink)' }}>{msg}</div>}
+      </div>
+    </div>
+  );
+}
+
 function Settings() {
   const fileRef = useRef();
   const [msg, setMsg] = useState('');
@@ -4023,6 +4383,8 @@ function Settings() {
     <Shell active="settings">
       <PageHead title="Settings" sub={`Workspace · Smart Vision Enterprise, Borsad · Data: ${saveState === 'saving' ? 'Saving…' : saveState === 'error' ? 'Save failed — retry from Backup' : 'Saved to disk'}`}/>
       <CompanyEditor/>
+      <WifiCsvPanel busy={busy} setBusy={setBusy} setMsg={setMsg} msg={msg}/>
+      <MobileSyncPanel busy={busy} setBusy={setBusy} setMsg={setMsg} msg={msg}/>
       <div className="panel">
         <div className="pah"><h3>Full Data Backup & Restore</h3><span className="sub">· CSV · every table</span></div>
         <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>

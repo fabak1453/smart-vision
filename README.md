@@ -1,69 +1,54 @@
-# Smart Vision ERP v9.0
+# Smart Vision ERP v9.5.0
 
-Windows desktop CCTV ERP — SQLite storage, offline license, Excel CSV backup, Google Drive sync.
+Windows desktop CCTV ERP — SQLite, offline license, Excel CSV backup, Google Drive sync. Android APK lives in **[apk/](apk/README.md)** and is not part of the Windows installer.
+
+Full docs: **[docs/README.md](docs/README.md)**
 
 ## Ship this
 
 | | |
 |---|---|
-| **Installer** | `dist\Smart Vision ERP Setup 9.0.0.exe` |
+| **Installer** | `dist/Smart Vision ERP Setup 9.5.0.exe` |
+| **Portable** | `dist/Smart Vision ERP 9.5.0 Portable.exe` |
 | **Owner login** | `smart` / `1234` |
-| **Team login** | Set username + password under **Team & Owners** |
-| **Remember me** | Login — save username and/or auto-sign-in next launch |
+| **Team login** | Username + password under **Team & Owners** |
 
-Do **not** share the `keygen/` folder (private signing key). The installer already omits it.
+Do **not** share `keygen/` or `build/certs/`. Do **not** ship Setup **9.4.0**.
 
-## What’s in v9
-
-- Portable license serials — paste in **Menu → License**; works on any PC (no Machine ID)
-- Master login `smart` / `1234`
-- Remember me + auto-login (credentials stored via Electron `safeStorage`)
-- Excel-friendly CSV backup / restore (Settings)
-- Google Drive backup / restore (Settings)
-- Customer cascade delete + restore brings linked quotes/jobs/etc. back
-- Edit / delete across Operations, Catalog, tickets, AMC, repairs, quotes, invoices
-- WhatsApp send: opens WhatsApp Web + saves PDF to Downloads
-
-## License (owner)
-
-1. Open `keygen/keygen.html` (or `cd keygen && npm install && node keygen.js …`)
-2. Generate a serial:
-
-```text
-node keygen.js --days 365 --name "Customer"
-node keygen.js --until 2027-03-31
-node keygen.js --lifetime
-node keygen.js --master
-```
-
-3. Customer pastes the serial in the app **License** window and clicks Activate.
-
-- **14-day trial** on first run (`TRIAL_DAYS` in `electron/license.js`)
-- Serial format: `SVE1.<payload>.<signature>` (offline Ed25519)
-
-## Data on the PC
-
-- Database: `%AppData%\Smart Vision ERP\data\erp.sqlite`
-- Local rotating backups: `data\backups\` (last 10)
-- Menu → **File → Open Data Folder**
-- Settings → CSV export / restore, Google Drive connect / backup / restore
-
-## Dev & build
+## Make the Windows installer again
 
 ```bash
 npm install
-npm start          # local run
-npm run dist       # Windows NSIS installer → dist/
+npm run dist
 ```
 
-On Mac, `npm run dist` rebuilds SQLite for Windows. Run `npm install` again before `npm start` locally.
+Output: `dist/Smart Vision ERP Setup <version>.exe`. Details: [docs/windows-installer.md](docs/windows-installer.md).
+
+After a Mac→Windows dist, run `npm install` again before `npm start` on the Mac.
+
+## Dev
+
+```bash
+npm install
+npm start
+npm run prepare-app          # compile JSX only
+node test-wiring.js
+node test-reliability.js
+node test-sync-merge.js
+```
+
+## Data on the PC
+
+`%AppData%\Smart Vision ERP\data\erp.sqlite` — **File → Open Data Folder**. CSV and Drive backup live in Settings.
 
 ## Layout
 
 ```text
-app/          ERP UI (index.html = login, erp.html = app)
-electron/     Main process, SQLite, license, Drive, saved login
-scripts/      prepare-app (offline React + compile JSX)
-keygen/       Owner only — serial generator (never ship)
-dist/         Built installer
+app/          ERP UI (Windows + copied into APK www)
+electron/     SQLite, license, Drive (Windows only)
+apk/          Android Capacitor project (never shipped in the .exe)
+docs/         Manuals
+scripts/      prepare-app
+keygen/       Owner serials (never ship)
+dist/         Built Windows installers (gitignored)
 ```

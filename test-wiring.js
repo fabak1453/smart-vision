@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const appJs = path.join(__dirname, 'app', 'smart-vision-app.js');
 const backupJs = path.join(__dirname, 'app', 'backup-csv.js');
+const modelJs = path.join(__dirname, 'app', 'erp-model.js');
 let code = fs.readFileSync(appJs, 'utf8');
 // expose internals for testing
 code += `\nglobalThis.__T = { DB, TEAM, ENTITIES, createInvoice, convertQuote, receivePO, refreshDerived,
@@ -35,6 +36,7 @@ sandbox.window = Object.assign(sandbox, { location: { hash: '' }, addEventListen
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(backupJs, 'utf8'), sandbox, { filename: 'backup-csv.js' });
+vm.runInContext(fs.readFileSync(modelJs, 'utf8'), sandbox, { filename: 'erp-model.js' });
 vm.runInContext(code, sandbox, { filename: 'app.js' });
 const T = sandbox.__T;
 const { DB, TEAM } = T;

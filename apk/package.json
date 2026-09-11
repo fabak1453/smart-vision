@@ -1,0 +1,17 @@
+{
+  "name": "smart-vision-erp-apk",
+  "private": true,
+  "description": "Android APK companion — isolated from the Windows Electron app",
+  "scripts": {
+    "sync-web": "node scripts/sync-web.js",
+    "sync": "npm run sync-web && npx cap sync android",
+    "open": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.5.1"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^8.5.1"
+  }
+}

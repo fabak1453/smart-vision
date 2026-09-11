@@ -61,11 +61,34 @@ function backup(dataDir) {
   } catch (e) { /* backups are best-effort */ }
 }
 
+function getMeta(key) {
+  try {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key);
+    return row ? row.value : null;
+  } catch (e) { return null; }
+}
+function setMeta(key, value) {
+  db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(value));
+}
+
+function getRevision() {
+  const n = parseInt(getMeta('revision') || '0', 10);
+  return Number.isFinite(n) ? n : 0;
+}
+function setRevision(n) {
+  setMeta('revision', String(n));
+}
+
 /** Load the saved snapshot (string of JSON) or '{}' on first run. */
 function loadState() {
   try {
     const row = db.prepare('SELECT json FROM state WHERE id = 1').get();
-    return row ? row.json : '{}';
+    if (!row) return '{}';
+    try {
+      const parsed = JSON.parse(row.json);
+      if (parsed && parsed.revision == null) parsed.revision = getRevision();
+      return JSON.stringify(parsed);
+    } catch (e) { return row.json; }
   } catch (e) { return '{}'; }
 }
 
@@ -91,6 +114,10 @@ function upsertEntityTable(name, rows) {
 /** Save snapshot + refresh the mirrored per-entity tables (one transaction). */
 function saveState(jsonText) {
   const parsed = JSON.parse(jsonText); // throws on bad JSON → caller returns 400
+  const prevRev = getRevision();
+  const incomingRev = Number(parsed.revision);
+  parsed.revision = Math.max(prevRev, Number.isFinite(incomingRev) ? incomingRev : 0);
+  jsonText = JSON.stringify(parsed);
   const tx = db.transaction(() => {
     db.prepare(`
       INSERT INTO state (id, json, updated_at) VALUES (1, ?, datetime('now'))
@@ -100,6 +127,7 @@ function saveState(jsonText) {
     const entities = (parsed && parsed.DB && typeof parsed.DB === 'object') ? parsed.DB : {};
     for (const [name, rows] of Object.entries(entities)) upsertEntityTable(name, rows);
     if (Array.isArray(parsed.TEAM)) upsertEntityTable('team', parsed.TEAM);
+    if (parsed.revision != null) setRevision(parsed.revision);
   });
   tx();
   return true;
@@ -107,4 +135,4 @@ function saveState(jsonText) {
 
 function close() { try { db && db.close(); } catch (e) { /* ignore */ } }
 
-module.exports = { init, loadState, saveState, close, get file() { return dbFile; } };
+module.exports = { init, loadState, saveState, close, getMeta, setMeta, getRevision, setRevision, get file() { return dbFile; } };
