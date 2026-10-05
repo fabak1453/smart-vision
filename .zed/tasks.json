@@ -1,0 +1,37 @@
+// Run with: command palette → "task: spawn". The agent uses the same commands.
+[
+  {
+    "label": "verify: everything",
+    "command": "node",
+    "args": [
+      "scripts/verify.js"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "verify: this test file",
+    "command": "node",
+    "args": [
+      "scripts/verify.js",
+      "$ZED_STEM"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "app: start desktop (Electron)",
+    "command": "npm",
+    "args": [
+      "start"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]

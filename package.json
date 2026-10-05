@@ -1,7 +1,7 @@
 {
   "name": "smart-vision-erp",
   "productName": "Smart Vision ERP",
-  "version": "9.5.0",
+  "version": "9.8.1",
   "private": true,
   "description": "Smart Vision Enterprise — CCTV ERP (Windows desktop, SQLite)",
   "main": "electron/main.js",
@@ -10,16 +10,20 @@
     "prepare-app": "node scripts/prepare-app.js",
     "start": "npm run prepare-app && electron .",
     "postinstall": "electron-builder install-app-deps",
-    "test": "npm run prepare-app && node test-wiring.js && node test-reliability.js && node test-sync-merge.js",
+    "test": "node scripts/verify.js",
+    "verify": "node scripts/verify.js",
     "apk:sync": "npm run prepare-app && npm --prefix apk run sync",
-    "dist": "CSC_IDENTITY_AUTO_DISCOVERY=false npm run prepare-app && electron-builder install-app-deps --platform win32 --arch x64 && electron-builder --win --x64",
+    "dist": "node scripts/dist-win.js",
     "dist:win": "npm run dist"
   },
   "dependencies": {
     "@babel/core": "^8.0.1",
     "@babel/preset-react": "^8.0.1",
     "@babel/standalone": "^7.26.4",
+    "@zxing/library": "0.23.0",
     "better-sqlite3": "^11.10.0",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^2.5.2",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },

@@ -5,50 +5,162 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>CSV sync — Smart Vision ERP</title>
 <style>
-  :root { --a:#0f8a6d; --ink:#23282e; --mut:#8b8577; --ln:#eae7df; --field:#f6f4ee; --red:#c0392b; }
+  :root { --a:#0f8a6d; --ink:#23282e; --mut:#8b8577; --ln:#eae7df; --field:#f6f4ee; --red:#c0392b; --ink2:#5d6470; }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #faf9f6; color: var(--ink); padding: 20px 16px 40px; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #faf9f6; color: var(--ink); padding: 20px 16px 40px; max-width: 640px; margin-left: auto; margin-right: auto; }
   h1 { font-size: 22px; margin: 0 0 6px; }
+  h2 { font-size: 15px; font-weight: 800; margin: 28px 0 8px; letter-spacing: .02em; }
   p { color: var(--mut); font-weight: 600; line-height: 1.45; }
   label { display: block; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--mut); margin: 16px 0 8px; }
   input[type=text], input[type=password] { width: 100%; font-size: 20px; letter-spacing: .12em; padding: 14px; border-radius: 12px; border: 1px solid var(--ln); background: #fff; }
-  .btn { width: 100%; border: 0; border-radius: 12px; padding: 16px; font-size: 17px; font-weight: 800; margin-top: 12px; }
+  .btn { width: 100%; border: 0; border-radius: 12px; padding: 16px; font-size: 17px; font-weight: 800; margin-top: 12px; cursor: pointer; }
   .btn-p { background: var(--a); color: #fff; }
   .btn-o { background: #fff; color: var(--ink); border: 1px solid var(--ln); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
   .msg { margin-top: 14px; font-weight: 700; font-size: 14px; }
   .err { color: var(--red); }
   .ok { color: var(--a); }
+  .card { background: #fff; border: 1px solid var(--ln); border-radius: 14px; padding: 12px 14px; margin-top: 10px; display: flex; align-items: center; gap: 10px; }
+  .card .k { flex: 1; min-width: 0; }
+  .card .l { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--mut); display: block; }
+  .card .v { font-size: 15px; font-weight: 800; color: var(--ink); word-break: break-all; margin-top: 2px; }
+  .card .v.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .06em; font-size: 18px; }
+  .card button { flex-shrink: 0; padding: 8px 12px; font-size: 12px; font-weight: 800; border-radius: 10px; border: 1px solid var(--ln); background: #fff; color: var(--ink); cursor: pointer; }
+  .hdrbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--a); box-shadow: 0 0 0 4px rgba(15,138,109,.15); }
+  .dot.off { background: var(--red); box-shadow: 0 0 0 4px rgba(192,57,43,.12); }
+  .step { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; }
+  .step .num { width: 24px; height: 24px; border-radius: 50%; background: var(--a); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; flex-shrink: 0; }
+  .step .t { font-weight: 700; font-size: 13.5px; line-height: 1.45; color: var(--ink2); }
+  .step .t b { color: var(--ink); }
+  .sep { height: 1px; background: var(--ln); margin: 20px 0; }
 </style>
 </head>
 <body>
-  <h1>CSV sync</h1>
-  <p>Same Wi-Fi as the shop PC. Enter the PIN from <b>Settings → Phone &amp; Samsung tablet</b> on the PC. Download the latest backup, or send a CSV back to the PC (replaces shop data).</p>
-  <label for="pin">PIN</label>
-  <input id="pin" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit PIN">
-  <button class="btn btn-p" type="button" id="dl">Download CSV to this phone / tablet</button>
-  <button class="btn btn-o" type="button" id="up">Send CSV to shop PC</button>
+  <div class="hdrbar">
+    <div class="dot" id="connDot"></div>
+    <div>
+      <h1 style="margin:0;">CSV sync</h1>
+      <div style="font-size:12px; color:var(--mut); font-weight:700;" id="connText">Checking shop PC…</div>
+    </div>
+  </div>
+  <p>Connected to the shop PC on the same Wi-Fi. Below are the server details. Download the latest backup, or send a CSV back to the PC (replaces shop data).</p>
+
+  <h2>Connection</h2>
+  <div class="card">
+    <div class="k"><span class="l">Server URL (this page)</span><span class="v" id="cardUrl"></span></div>
+    <button type="button" id="copyUrl">Copy</button>
+  </div>
+  <div class="card">
+    <div class="k"><span class="l">IP address</span><span class="v mono" id="cardIp">—</span></div>
+    <button type="button" id="copyIp">Copy</button>
+  </div>
+  <div class="card">
+    <div class="k"><span class="l">Port</span><span class="v mono" id="cardPort">—</span></div>
+    <button type="button" id="copyPort">Copy</button>
+  </div>
+
+  <div class="sep"></div>
+
+  <h2>How to use</h2>
+  <div class="step"><div class="num">1</div><div class="t">On the <b>shop PC</b>, open <b>Settings → Phone &amp; Samsung tablet</b>. Click <b>Turn on Wi-Fi CSV</b>.</div></div>
+  <div class="step"><div class="num">2</div><div class="t">Enter the <b>6-digit PIN</b> shown on the PC in the box below.</div></div>
+  <div class="step"><div class="num">3</div><div class="t"><b>Download CSV</b> to pull data onto this device, edit in Excel, then <b>Send CSV to shop PC</b> to restore.</div></div>
+
+  <div class="sep"></div>
+
+  <label for="pin">PIN (from shop PC — Settings → Phone &amp; Samsung tablet)</label>
+  <input id="pin" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit PIN" maxlength="6">
+  <button class="btn btn-p" type="button" id="dl">⬇ Download CSV to this phone / tablet</button>
+  <button class="btn btn-o" type="button" id="up">⬆ Send CSV to shop PC</button>
   <input id="file" type="file" accept=".csv,text/csv" hidden>
   <div class="msg" id="msg"></div>
 <script>
 (function () {
   var msg = document.getElementById('msg');
+  var dot = document.getElementById('connDot');
+  var txt = document.getElementById('connText');
+  var cardUrl = document.getElementById('cardUrl');
+  var cardIp = document.getElementById('cardIp');
+  var cardPort = document.getElementById('cardPort');
+  try {
+    var here = window.location.href.split('#')[0].split('?')[0];
+    cardUrl.textContent = here;
+    var m = here.match(/^https?:\/\/([^/:]+):(\d+)/i);
+    if (m) { cardIp.textContent = m[1]; cardPort.textContent = m[2]; }
+    else {
+      var host = window.location.hostname;
+      var port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+      cardIp.textContent = host || '—';
+      cardPort.textContent = port;
+    }
+    fetch('./api/status', { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('bad status');
+      return r.json();
+    }).then(function (st) {
+      if (st && st.enabled) {
+        dot.className = 'dot';
+        txt.textContent = 'Connected to shop PC — ready.';
+      } else {
+        dot.className = 'dot off';
+        txt.textContent = 'Shop PC reached, but Wi-Fi CSV is OFF. Turn it on in the PC Settings page.';
+      }
+    }).catch(function () {
+      dot.className = 'dot off';
+      txt.textContent = 'Cannot reach the shop PC. Put both devices on the same Wi-Fi and enable Wi-Fi CSV on the PC.';
+    });
+  } catch (e) {}
+  function copy(t) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(String(t || '')).then(function () { show('Copied ✓', true); setTimeout(function () { show(''); }, 1500); });
+        return;
+      }
+    } catch (e) {}
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = String(t || ''); ta.style.position = 'fixed'; ta.style.left = '-9999px';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+      show('Copied ✓', true); setTimeout(function () { show(''); }, 1500);
+    } catch (e) {}
+  }
+  document.getElementById('copyUrl').onclick = function () { copy(cardUrl.textContent); };
+  document.getElementById('copyIp').onclick  = function () { copy(cardIp.textContent); };
+  document.getElementById('copyPort').onclick= function () { copy(cardPort.textContent); };
   function pin() { return (document.getElementById('pin').value || '').trim(); }
-  function show(t, ok) { msg.className = 'msg ' + (ok ? 'ok' : 'err'); msg.textContent = t; }
+  function show(t, ok) { if (!t) { msg.className = 'msg'; msg.textContent = ''; return; } msg.className = 'msg ' + (ok ? 'ok' : 'err'); msg.textContent = t; }
   document.getElementById('dl').onclick = function () {
     var p = pin();
-    if (!p) { show('Enter the PIN from the shop PC.'); return; }
-    window.location.href = './backup/export?pin=' + encodeURIComponent(p);
+    if (!p) { show('Enter the 6-digit PIN from the shop PC Settings page.'); return; }
+    show('Downloading CSV…', true);
+    fetch('./backup/export?pin=' + encodeURIComponent(p), { cache: 'no-store' })
+      .then(function (r) {
+        if (r.ok) return r.text();
+        return r.json().then(function (j) { throw new Error(j.error || 'Download failed.'); })
+          .catch(function () { throw new Error('Download failed — check the PIN and that Wi-Fi CSV is on.'); });
+      })
+      .then(function (text) {
+        var blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'cctv-erp-backup-' + new Date().toISOString().slice(0, 10) + '.csv';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+        show('✓ Downloaded from the shop PC. Edit in Excel, then use “Send CSV to shop PC” to restore.', true);
+      })
+      .catch(function (e) { show(e.message || 'Download failed — check Wi-Fi and PIN.'); });
   };
   document.getElementById('up').onclick = function () {
-    if (!pin()) { show('Enter the PIN from the shop PC.'); return; }
+    if (!pin()) { show('Enter the 6-digit PIN from the shop PC Settings page.'); return; }
     document.getElementById('file').click();
   };
   document.getElementById('file').onchange = function () {
     var f = this.files && this.files[0];
     this.value = '';
     if (!f) return;
-    if (!confirm('This REPLACES all data on the shop PC with this CSV. Continue?')) return;
-    show('Sending…', true);
+    if (!confirm('⚠️ This REPLACES ALL DATA on the shop PC with this CSV file. All existing invoices, customers, products, stock and serials will be overwritten. Continue?')) return;
+    show('Sending CSV to shop PC…', true);
     f.text().then(function (text) {
       return fetch('./backup/import?pin=' + encodeURIComponent(pin()), {
         method: 'POST',
@@ -57,9 +169,11 @@
       });
     }).then(function (res) { return res.json().then(function (j) { return { res: res, j: j }; }); })
       .then(function (x) {
-        if (!x.res.ok) { show(x.j.error || 'Upload failed'); return; }
-        show('Sent to shop PC. Open Smart Vision ERP on the PC and confirm the data.', true);
-      }).catch(function (e) { show(e.message || 'Upload failed'); });
+        if (!x.res.ok) { show(x.j.error || 'Upload failed. Wrong PIN?'); return; }
+        var total = 0;
+        try { total = Object.values(x.j.restored || {}).reduce(function (a, b) { return a + b; }, 0); } catch (e) {}
+        show('✓ Sent to shop PC. Restored ' + (total || 'records') + '. Open Smart Vision ERP on the PC and confirm the data — then refresh this page.', true);
+      }).catch(function (e) { show(e.message || 'Upload failed — check Wi-Fi and PIN.'); });
   };
 })();
 </script>

@@ -31,7 +31,10 @@ function useLocation() {
 }
 function useNavigate() {
   return (to) => {
-    const path = String(to).startsWith('/') ? to : '/' + to;
+    let path = String(to).startsWith('/') ? to : '/' + to;
+    // A nonce keeps the hash unique so re-opening the same record (e.g. picking
+    // the same search result twice) still fires a hashchange and re-opens it.
+    if (path.includes('?')) path += '&_=' + Date.now();
     if (window.location.hash !== '#' + path) window.location.hash = path;
   };
 }
@@ -85,6 +88,8 @@ const TODAY = new Date();
 const iso = (days) => { const d = new Date(TODAY); d.setDate(d.getDate() + days); return d.toISOString(); };
 const O = (name) => (typeof name === 'object' && name ? name : { name });
 const Erp = (typeof globalThis !== 'undefined' && globalThis.SV_ERP) || null;
+// Printed bill / quotation builder (app/bill-format.js), shared with the WhatsApp PDF.
+const SvBill = (typeof globalThis !== 'undefined' && globalThis.SvBill) || null;
 function getDeviceId() {
   try {
     let id = localStorage.getItem('sv_device_id');
@@ -245,6 +250,8 @@ const DB = {
     { id: 3, number: 'CB-8003', direction: 'in', category: 'Other income', amount: 2500, on: iso(-3), party: 'Scrap buyer', note: 'Old camera scrap' },
   ],
   stock_moves: [],
+  // Deleted records: { table, uuid, deleted_at }. Lets sync tell "deleted" from "never seen".
+  tombstones: [],
 };
 
 /* ---------------- derived report payloads ---------------- */
@@ -366,23 +373,116 @@ function searchRank(hay, q) {
   return 3;
 }
 function searchTop(rows, hayFn, q, limit) {
-  return rows
-    .map((r, i) => ({ r, i, rank: searchRank(hayFn(r), q) }))
-    .filter((x) => searchMatch(hayFn(x.r), q))
+  // The haystack was being built twice per row and ranked even for rows that
+  // did not match — on a shop with thousands of serials that is most of the
+  // cost of every keystroke.
+  const hits = [];
+  const list = rows || [];
+  for (let i = 0; i < list.length; i++) {
+    const hay = hayFn(list[i]);
+    if (!searchMatch(hay, q)) continue;
+    hits.push({ r: list[i], i, rank: searchRank(hay, q) });
+  }
+  return hits
     .sort((a, b) => a.rank - b.rank || a.i - b.i)
     .slice(0, limit)
     .map((x) => x.r);
 }
+const refNorm = (v) => String(v == null ? '' : v).trim().toLowerCase();
+/** A serial/equipment product reference may be a name, SKU, uuid, id, or an object. */
+function productRefKeys(ref) {
+  if (ref == null) return [];
+  if (typeof ref !== 'object') return [refNorm(ref)];
+  return [ref.uuid, ref.name, ref.sku, ref.id].filter((v) => v != null && v !== '').map(refNorm);
+}
+/** Resolve a serial/equipment product reference to the product row in Inventory. */
+function findProductByRef(ref) {
+  const want = productRefKeys(ref);
+  if (!want.length) return null;
+  return DB.products.find((p) => p && productRefKeys(p).some((k) => want.indexOf(k) >= 0)) || null;
+}
 function searchPayload(q) {
   q = String(q || '').trim();
+  const matchedSerials = searchTop(DB.serials, (s) => [s.serial_no, s.product?.name, s.product, s.customer?.name].join(' '), q, 50);
+  const productFromSerialSet = new Set();
+  const serialHitsByProduct = new Map();
+  const noteHit = (pid, serialNo) => {
+    if (!pid || !serialNo) return;
+    const list = serialHitsByProduct.get(pid) || [];
+    if (list.indexOf(serialNo) < 0) list.push(serialNo);
+    serialHitsByProduct.set(pid, list);
+  };
+  matchedSerials.forEach((s) => {
+    const p = findProductByRef(s.product);
+    if (p) { productFromSerialSet.add(p.id); noteHit(p.id, s.serial_no); }
+  });
+  DB.equipment.forEach((e) => {
+    const sn = e.serial?.serial_no;
+    if (!sn || !searchMatch(sn, q)) return;
+    const p = findProductByRef(e.product) || findProductByRef(e.name);
+    if (p) { productFromSerialSet.add(p.id); noteHit(p.id, sn); }
+  });
+  DB.repairs.forEach((r) => {
+    if (!r.serial_no || !searchMatch(r.serial_no, q)) return;
+    const p = findProductByRef(r.device);
+    if (p) { productFromSerialSet.add(p.id); noteHit(p.id, r.serial_no); }
+  });
+  const directProducts = searchTop(DB.products, (p) => [p.sku, p.barcode, p.name, p.specs, p.category].join(' '), q, 20);
+  const directIds = new Set(directProducts.map((p) => p.id));
+  const extraProducts = [];
+  productFromSerialSet.forEach((pid) => {
+    if (!directIds.has(pid)) {
+      const p = DB.products.find((x) => x.id === pid);
+      if (p) extraProducts.push(p);
+    }
+  });
+  // Serial-first ordering. A partial serial usually also matches SKUs and specs,
+  // so products reached THROUGH a serial are hoisted above plain text matches and
+  // can never be pushed past the 20-row cut-off.
+  const serialFirst = [];
+  const otherProducts = [];
+  directProducts.forEach((p) => { (productFromSerialSet.has(p.id) ? serialFirst : otherProducts).push(p); });
+  extraProducts.forEach((p) => { serialFirst.push(p); });
+  const allProducts = serialFirst.concat(otherProducts).slice(0, 20).map((p) => {
+    const hits = serialHitsByProduct.get(p.id);
+    return hits && hits.length ? Object.assign({}, p, { matched_serials: hits }) : p;
+  });
   return { results: {
-    products: searchTop(DB.products, (p) => [p.sku, p.name, p.specs, p.category].join(' '), q, 20),
+    products: allProducts,
     customers: searchTop(DB.customers, (c) => [c.name, c.area, c.contact_name, c.phone].join(' '), q, 8),
     invoices: searchTop(DB.invoices, (i) => [i.number, i.customer?.name, i.note].join(' '), q, 8),
-    serials: searchTop(DB.serials, (s) => [s.serial_no, s.product?.name, s.customer?.name].join(' '), q, 8),
+    serials: matchedSerials.slice(0, 8),
     tickets: searchTop(DB.tickets, (t) => [t.number, t.issue, t.customer?.name].join(' '), q, 8),
     leads: searchTop(DB.leads, (l) => [l.name, l.requirement, l.source, l.segment].join(' '), q, 8),
   } };
+}
+
+/** All serial numbers (serial register + installed equipment) that belong to a product. */
+function productSerialRows(product) {
+  if (!product) return [];
+  const targetKeys = productRefKeys(product);
+  const matchesProduct = (ref) => {
+    const keys = productRefKeys(ref);
+    return keys.length > 0 && keys.some((k) => targetKeys.indexOf(k) >= 0);
+  };
+  const rows = [];
+  const seen = new Set();
+  (DB.serials || []).forEach((s) => {
+    if (!s || s.deleted_at || !matchesProduct(s.product)) return;
+    const sn = s.serial_no || '';
+    if (!sn || seen.has(sn)) return;
+    seen.add(sn);
+    rows.push({ serial_no: sn, status: s.status || 'in_stock', customer: s.customer?.name || '', source: 'serial' });
+  });
+  (DB.equipment || []).forEach((e) => {
+    if (!e || e.deleted_at) return;
+    const sn = e.serial?.serial_no;
+    if (!sn || seen.has(sn)) return;
+    if (!matchesProduct(e.product) && !matchesProduct(e.name)) return;
+    seen.add(sn);
+    rows.push({ serial_no: sn, status: 'installed', customer: e.customer?.name || '', source: 'equipment' });
+  });
+  return rows;
 }
 
 /* ---------------- mock api router ---------------- */
@@ -507,6 +607,7 @@ const ICONS = {
   download: <><path d="M12 3v11"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M4 20.5h16"/></>,
   upload: <><path d="M12 21V10"/><path d="M7.5 13.5L12 9l4.5 4.5"/><path d="M4 3.5h16"/></>,
   eye: <><path d="M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/><circle cx="12" cy="12" r="2.4"/></>,
+  wallet: <><path d="M4 7.5h14.5a1.5 1.5 0 0 1 1.5 1.5v9.5a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M4 7.5V6a1.5 1.5 0 0 1 1.5-1.5H16"/><path d="M16 13.75h4"/><circle cx="16.5" cy="13.75" r=".6"/></>,
   printer: <><path d="M7 8V3.5h10V8"/><path d="M7 17H4v-7.5h16V17h-3"/><rect x="7" y="14" width="10" height="6.5"/></>,
   send: <><path d="M21.5 2.5L11 13"/><path d="M21.5 2.5L15 21l-4-8-8.5-4z"/></>,
   chevD: <path d="M6.5 9.5l5.5 5.5 5.5-5.5"/>,
@@ -578,6 +679,10 @@ const COMPANY_DEFAULT = {
   extras: 'Extra: CCTV cabling (incl. PVC pipe & laying) ₹65/Mtr · Camera fitting ₹250/No.',
   quoteTerms: 'Prices are inclusive of GST. 50% advance along with the order, balance on completion. Warranty as per brand standard. This quotation is valid for 15 days from the date above.',
   invoiceTerms: 'Thank you for your business. Please make payment by the due date via UPI / NEFT / cheque in favour of Smart Vision Enterprise.',
+  quoteFallback: 'CCTV solution',
+  invoiceFallback: 'CCTV Supply, Installation & Commissioning',
+  gst_scheme: 'regular', // 'composition' → documents print as Bill of Supply, no tax
+  default_gst_rate: 18,
   ledgerCategories: [],
 };
 const COMPANY = (() => {
@@ -671,12 +776,14 @@ function applyState(s, present) {
   if (Erp) Erp.ensureSyncMeta({ DB, TEAM, CATALOG, COMPANY }, { deviceId: getDeviceId() });
 }
 let currentRevision = 0;
-function snapshotState() {
+// `savedAt` is first so a saved payload can be re-stamped with one string
+// replace, and passing 0 gives a stable key for "has anything actually changed".
+function snapshotState(at) {
   const snap = {
-    DB, TEAM, CATALOG, COMPANY: { ...COMPANY },
-    savedAt: Date.now(),
+    savedAt: at == null ? Date.now() : at,
     revision: currentRevision,
     device_id: getDeviceId(),
+    DB, TEAM, CATALOG, COMPANY: { ...COMPANY },
   };
   if (Erp) Erp.ensureSyncMeta(snap, { deviceId: getDeviceId() });
   return snap;
@@ -685,18 +792,52 @@ let lastSaved = '';
 let persistQueue = Promise.resolve();
 let persistWanted = false;
 function markSaved(payload) { lastSaved = payload; }
+function stampPayload(payload) {
+  const stamped = payload.replace('{"savedAt":0', '{"savedAt":' + Date.now());
+  return stamped === payload ? payload : stamped;
+}
+function dataApiPost(payload, keepalive, baseSeq) {
+  const headers = dataApiHeaders({ 'Content-Type': 'application/json' });
+  if (baseSeq != null && Number.isFinite(Number(baseSeq))) headers['X-SV-Base-Seq'] = String(baseSeq);
+  const opts = { method: 'POST', headers, body: payload };
+  if (keepalive) opts.keepalive = true;
+  return fetch(API_URL, opts);
+}
 async function persistStateNow() {
   let payload;
-  try { payload = JSON.stringify(snapshotState()); } catch (e) { return false; }
+  // savedAt is pinned to 0 for this comparison: it used to change on every call,
+  // so "nothing changed" was never true and the whole snapshot was rewritten and
+  // re-uploaded every 1.5 seconds even when the shop was idle.
+  try { payload = JSON.stringify(snapshotState(0)); } catch (e) { return false; }
   if (payload === lastSaved) return true;
-  let localOk = true;
-  try { localStorage.setItem(PERSIST_KEY, payload); } catch (e) { localOk = false; }
+  const localOk = await writeOfflineSnapshot(stampPayload(payload));
   if (!serverOK || getPairing()) {
     if (localOk) markSaved(payload);
     return localOk;
   }
   try {
-    const res = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload });
+    let body = stampPayload(payload);
+    let res = await dataApiPost(body, false, serverSeq);
+    if (res && res.status === 409) {
+      // Someone else wrote since we loaded. Replay our edits on top of theirs
+      // instead of overwriting them, then save once more.
+      const conflict = await res.json().catch(() => null);
+      if (conflict && conflict.snapshot) {
+        applyState(Erp ? Erp.rebaseLocal(conflict.snapshot, snapshotState()) : conflict.snapshot);
+        currentRevision = num(conflict.snapshot.revision);
+        serverSeq = Number(conflict.seq);
+        try { payload = JSON.stringify(snapshotState(0)); } catch (e) { return false; }
+        body = stampPayload(payload);
+        await writeOfflineSnapshot(body);
+        res = await dataApiPost(body, false, serverSeq);
+      }
+    }
+    if (res && (res.status === 401 || res.status === 403)) flagLanAuth(true);
+    if (res && res.ok) {
+      const done = await res.json().catch(() => null);
+      const n = done && Number(done.seq);
+      if (Number.isFinite(n)) serverSeq = n;
+    }
     const ok = localOk && !!(res && res.ok);
     if (ok) markSaved(payload);
     return ok;
@@ -704,18 +845,196 @@ async function persistStateNow() {
 }
 function writeStateSync() {
   let payload;
-  try { payload = JSON.stringify(snapshotState()); } catch (e) { return; }
+  try { payload = JSON.stringify(snapshotState(0)); } catch (e) { return; }
   if (payload === lastSaved) return;
-  try { localStorage.setItem(PERSIST_KEY, payload); } catch (e) { /* ignore */ }
+  const stamped = stampPayload(payload);
+  // Closing down: localStorage is the only store that can be written without
+  // waiting. IndexedDB is kicked off too and may or may not land.
+  try { localStorage.setItem(PERSIST_KEY, stamped); } catch (e) { idbPut(PERSIST_KEY, stamped); }
   if (serverOK && !getPairing()) {
     try {
-      fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true });
+      dataApiPost(stamped, true, serverSeq);
     } catch (e) { /* ignore */ }
     return;
   }
   markSaved(payload);
 }
 
+/* ---------------- LAN transport ----------------
+   Two problems this solves:
+   1. The Android APK page runs on https://localhost (Capacitor), while the shop
+      PC serves plain http://192.168.x.x. A WebView refuses that as mixed
+      content no matter what the cleartext policy says, so on Android every
+      shop-PC call is handed to Capacitor's native HTTP plugin, which is not
+      bound by the page's origin. Everywhere else plain fetch is used.
+   2. A phone/tablet browser working on the PC's live data has to prove itself
+      to /api.php. The shop PIN does that. */
+function nativeHttp() {
+  try {
+    const plugins = typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins;
+    return (plugins && plugins.CapacitorHttp) || null;
+  } catch (e) { return null; }
+}
+/** fetch() for shop-PC calls. Uses native HTTP inside the APK, fetch elsewhere. */
+async function lanFetch(url, opts) {
+  const o = opts || {};
+  const absolute = /^https?:\/\//i.test(String(url || ''));
+  const http = absolute ? nativeHttp() : null;
+  if (!http) return fetch(url, o);
+  const res = await http.request({
+    url: String(url),
+    method: String(o.method || 'GET').toUpperCase(),
+    headers: Object.assign({}, o.headers),
+    data: o.body == null ? undefined : o.body,
+    responseType: 'text',
+    connectTimeout: 15000,
+    readTimeout: 60000,
+  });
+  const status = Number(res && res.status) || 0;
+  const raw = res ? res.data : '';
+  const text = typeof raw === 'string' ? raw : (raw == null ? '' : JSON.stringify(raw));
+  return {
+    ok: status >= 200 && status < 400,
+    status,
+    text: async () => text,
+    json: async () => (raw && typeof raw === 'object' ? raw : JSON.parse(text || '{}')),
+  };
+}
+
+/* ---------------- shop PIN for the live data API ---------------- */
+const SV_LAN_PIN_KEY = 'sv_lan_pin';
+let lanAuthRequired = false;
+function getLanPin() {
+  try { return localStorage.getItem(SV_LAN_PIN_KEY) || ''; } catch (e) { return ''; }
+}
+function setLanPin(p) {
+  try {
+    if (p) localStorage.setItem(SV_LAN_PIN_KEY, String(p));
+    else localStorage.removeItem(SV_LAN_PIN_KEY);
+  } catch (e) { /* ignore */ }
+}
+function dataApiHeaders(extra) {
+  const h = Object.assign({}, extra);
+  const p = getLanPin();
+  if (p) h['X-SV-PIN'] = p;
+  return h;
+}
+function flagLanAuth(on) {
+  const want = !!on;
+  if (lanAuthRequired === want) return;
+  lanAuthRequired = want;
+  if (typeof window === 'undefined') return;
+  try { window.dispatchEvent(new CustomEvent('sv-lan-auth', { detail: { required: want } })); } catch (e) { /* ignore */ }
+}
+/* ---------------- offline snapshot store ----------------
+   localStorage is capped at roughly 5 MB per origin. A shop a few years in
+   passes that, and the old code let setItem throw — so a phone or a
+   disconnected tablet ended up with no saved copy at all while the header
+   still said "Saved". Fall through to IndexedDB, which has no such ceiling. */
+let offlineMode = 'local'; // 'local' | 'idb' | 'none'
+const OFFLINE_DB = 'smart-vision-erp';
+const OFFLINE_STORE = 'snapshots';
+function idbOpen() {
+  return new Promise((resolve) => {
+    try {
+      if (typeof indexedDB === 'undefined' || !indexedDB) return resolve(null);
+      const req = indexedDB.open(OFFLINE_DB, 1);
+      req.onupgradeneeded = () => {
+        try { req.result.createObjectStore(OFFLINE_STORE); } catch (e) { /* exists */ }
+      };
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+      req.onblocked = () => resolve(null);
+    } catch (e) { resolve(null); }
+  });
+}
+function idbPut(key, value) {
+  return idbOpen().then((db) => new Promise((resolve) => {
+    if (!db) return resolve(false);
+    try {
+      const tx = db.transaction(OFFLINE_STORE, 'readwrite');
+      tx.objectStore(OFFLINE_STORE).put(value, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+    } catch (e) { resolve(false); }
+  })).catch(() => false);
+}
+function idbGet(key) {
+  return idbOpen().then((db) => new Promise((resolve) => {
+    if (!db) return resolve(null);
+    try {
+      const tx = db.transaction(OFFLINE_STORE, 'readonly');
+      const rq = tx.objectStore(OFFLINE_STORE).get(key);
+      rq.onsuccess = () => resolve(rq.result == null ? null : String(rq.result));
+      rq.onerror = () => resolve(null);
+    } catch (e) { resolve(null); }
+  })).catch(() => null);
+}
+/** Write the offline copy. Returns false only when nowhere would take it. */
+async function writeOfflineSnapshot(payload) {
+  if (offlineMode !== 'idb' && offlineMode !== 'none') {
+    try {
+      localStorage.setItem(PERSIST_KEY, payload);
+      return true;
+    } catch (e) {
+      // Out of room. Free the slot and move this device to IndexedDB for good.
+      offlineMode = 'idb';
+      try { localStorage.removeItem(PERSIST_KEY); } catch (e2) { /* ignore */ }
+    }
+  }
+  const ok = await idbPut(PERSIST_KEY, payload);
+  offlineMode = ok ? 'idb' : 'none';
+  return ok;
+}
+async function readOfflineSnapshot() {
+  try {
+    const v = localStorage.getItem(PERSIST_KEY);
+    if (v) return v;
+  } catch (e) { /* ignore */ }
+  const v = await idbGet(PERSIST_KEY);
+  if (v) offlineMode = 'idb';
+  return v || null;
+}
+function offlineStorageMode() { return offlineMode; }
+
+/* ---------------- shop database version ----------------
+   `seq` moves on every write to the shop PC, whoever made it — this window, a
+   phone sync, or a CSV restore. Carrying it on saves is what stops one device
+   overwriting another's work, and polling it is how a device notices a change
+   it did not make. */
+let serverSeq = null;
+async function fetchServerStamp() {
+  try {
+    const res = await fetch('./api/revision?t=' + Date.now(), { cache: 'no-store', headers: dataApiHeaders() });
+    if (!res || !res.ok) return null;
+    const st = await res.json().catch(() => null);
+    const n = st && Number(st.seq);
+    return Number.isFinite(n) ? n : null;
+  } catch (e) { return null; }
+}
+/**
+ * Pull a change somebody else made. With nothing unsaved locally the server
+ * copy is taken as-is (so a CSV restore really lands, deletions included);
+ * with unsaved edits in hand they are replayed on top instead of being lost.
+ */
+async function pullServerChanges() {
+  if (!serverOK || getPairing()) return false;
+  const seq = await fetchServerStamp();
+  if (seq == null || seq === serverSeq) return false;
+  const remote = await loadServerState();
+  if (!remote || stateRecordCount(remote) === 0) return false;
+  let dirty = true;
+  try { dirty = JSON.stringify(snapshotState(0)) !== lastSaved; } catch (e) { dirty = true; }
+  applyState(dirty && Erp ? Erp.rebaseLocal(remote, snapshotState()) : remote);
+  currentRevision = num(remote.revision);
+  serverSeq = seq;
+  lastSaved = '';
+  if (typeof window !== 'undefined') {
+    try { window.dispatchEvent(new CustomEvent('sv-remote-change')); } catch (e) { /* ignore */ }
+  }
+  return true;
+}
 function pairingAuthHeaders(p) {
   const pair = p || getPairing();
   if (!pair || !pair.token) return {};
@@ -728,7 +1047,7 @@ function shopUrl(path) {
 }
 async function pairWithShop({ url, pin }) {
   const base = String(url || '').trim().replace(/\/+$/, '');
-  const res = await fetch(base + '/api/pair', {
+  const res = await lanFetch(base + '/api/pair', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pin: String(pin || '').trim(), device_id: getDeviceId() }),
@@ -748,16 +1067,25 @@ async function pairWithShop({ url, pin }) {
   }
   return data;
 }
+function mergeDeletes(a, b) {
+  const seen = new Set();
+  return [].concat(a || [], b || []).filter((d) => {
+    const k = d && d.table + ':' + d.uuid;
+    if (!d || !d.uuid || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
 async function syncWithShop() {
   const pair = getPairing();
   if (!pair || !Erp) throw new Error('Not paired with a shop PC.');
   await persistStateNow();
   const local = snapshotState();
   const body = Erp.collectPending(local, currentRevision);
-  body.deletes = pendingDeletes.slice();
+  body.deletes = mergeDeletes(body.deletes, pendingDeletes);
   body.device_id = getDeviceId();
   body.base_revision = currentRevision;
-  const post = async (payload) => fetch(shopUrl('/api/sync'), {
+  const post = async (payload) => lanFetch(shopUrl('/api/sync'), {
     method: 'POST',
     headers: pairingAuthHeaders(pair),
     body: JSON.stringify(payload),
@@ -765,11 +1093,15 @@ async function syncWithShop() {
   let res = await post(body);
   let data = await res.json().catch(() => ({}));
   if (res.status === 409 && data.snapshot) {
-    const retry = Erp.localOnlyPayload(data.snapshot, local);
-    retry.deletes = pendingDeletes.slice();
+    // The shop moved on since this device last synced (another device synced, or a
+    // restore). Send everything again against the newer revision; the merge keeps
+    // whichever side changed each record last. Sending only brand-new records, as
+    // before, silently dropped this device's edits to existing ones (a price
+    // change, a payment). Local data is left alone until the shop accepts it.
+    const retry = Erp.collectPending(local, num(data.snapshot.revision));
+    retry.deletes = mergeDeletes(retry.deletes, pendingDeletes);
     retry.device_id = getDeviceId();
     retry.base_revision = num(data.snapshot.revision);
-    applyState(Erp.rebaseLocal(data.snapshot, local));
     res = await post(retry);
     data = await res.json().catch(() => ({}));
   }
@@ -839,8 +1171,10 @@ function afterMutation() {
 }
 async function loadServerState() {
   try {
-    const res = await fetch(API_URL + '?t=' + Date.now());
+    const res = await fetch(API_URL + '?t=' + Date.now(), { cache: 'no-store', headers: dataApiHeaders() });
+    if (res && (res.status === 401 || res.status === 403)) { flagLanAuth(true); return null; }
     if (!res || !res.ok) return null;
+    flagLanAuth(false);
     serverOK = true;
     if (typeof res.text === 'function') {
       const raw = await res.text();
@@ -858,8 +1192,11 @@ function finishBoot(serverState, localState) {
   const lc = stateRecordCount(localState);
   const sAt = Number(serverState && serverState.savedAt) || 0;
   const lAt = Number(localState && localState.savedAt) || 0;
+  // A device connected with the shop PIN is a terminal on the PC's data, not a
+  // peer: its own older copy must never win and get pushed back to the shop.
+  const remoteTerminal = !!getLanPin();
   if (sc > 0 && lc > 0) {
-    if (shouldPreferLocalSnapshot(localState, serverState, lc, sc, lAt, sAt)) applyState(localState);
+    if (!remoteTerminal && shouldPreferLocalSnapshot(localState, serverState, lc, sc, lAt, sAt)) applyState(localState);
     else applyState(serverState);
   } else if (sc > 0) {
     applyState(serverState);
@@ -877,9 +1214,10 @@ function finishBoot(serverState, localState) {
 let bootReady = false;
 const bootPromise = (async () => {
   let localState = null;
-  try { localState = JSON.parse(localStorage.getItem(PERSIST_KEY) || 'null'); } catch (e) { /* ignore */ }
+  try { localState = JSON.parse((await readOfflineSnapshot()) || 'null'); } catch (e) { /* ignore */ }
   if (stateRecordCount(localState) > 0) applyState(localState);
   const serverState = await loadServerState();
+  if (serverState) serverSeq = await fetchServerStamp();
   finishBoot(serverState, localState);
   bootReady = true;
 })().catch(() => { bootReady = true; });
@@ -920,7 +1258,7 @@ async function importBackupCsv(text) {
   if (Array.isArray(newTeam)) present.add('team');
   if (newCatalog) present.add('catalog');
   if (newCompany) present.add('company');
-  const omitted = Object.keys(DB).filter((k) => k !== 'stock_moves' && Array.isArray(DB[k]) && DB[k].length > 0 && !present.has(k));
+  const omitted = Object.keys(DB).filter((k) => k !== 'stock_moves' && k !== 'tombstones' && Array.isArray(DB[k]) && DB[k].length > 0 && !present.has(k));
   if (omitted.length) {
     throw new Error('Incomplete backup (missing ## ' + omitted.join(', ## ') + '). Restore cancelled so live data is not wiped.');
   }
@@ -1019,13 +1357,20 @@ function normalizeQuoteItems(raw) {
     if (!description) return;
     const p = findProductForLine(description, i.product_id);
     const qty = lineItemQty(i);
-    out.push({
+    const line = {
       id: out.length + 1,
       description,
       amount: num(i.amount),
       qty,
       product_id: p ? p.id : (num(i.product_id) || null),
-    });
+    };
+    if (i.uuid) line.uuid = i.uuid;
+    // The bill keeps the rate it was made with, even if the product's rate changes later.
+    const rate = i.gst_rate !== undefined && i.gst_rate !== '' && i.gst_rate !== null ? num(i.gst_rate) : (p && p.gst_rate != null ? num(p.gst_rate) : null);
+    if (rate != null) line.gst_rate = rate;
+    const hsn = i.hsn || (p && p.hsn); if (hsn) line.hsn = hsn;
+    const unit = i.unit || (p && p.unit); if (unit) line.unit = unit;
+    out.push(line);
   });
   return out;
 }
@@ -1094,9 +1439,15 @@ function healAcceptedQuoteLinks() {
 }
 // Lead won → make sure the customer exists in the Customers module.
 function ensureCustomer(lead) {
-  if (!lead || DB.customers.some((c) => c.name === lead.name)) return;
+  if (!lead) return;
+  const existing = DB.customers.find((c) => c.name === lead.name);
+  if (existing) {
+    // The lead may have gained a number after the customer was created.
+    if (!existing.phone && lead.phone) { existing.phone = lead.phone; touch(existing); }
+    return;
+  }
   const row = { id: nextId(DB.customers), name: lead.name, area: '', type: lead.segment || 'Commercial',
-    contact_name: '', phone: '', sites: 1, owner: O(lead.owner?.name || teamNames()[0]), lifetime_value: 0 };
+    contact_name: '', phone: lead.phone || '', sites: 1, owner: O(lead.owner?.name || teamNames()[0]), lifetime_value: 0 };
   touch(row);
   DB.customers.push(row);
 }
@@ -1180,10 +1531,64 @@ function parseEntryDate(v) {
   if (s && !Number.isNaN(new Date(s).getTime())) return new Date(s).toISOString();
   return iso(0);
 }
-function inAccountsPeriod(d, period) {
-  if (period !== 'month') return true;
+/* ---------------- periods: 'month' (this), 'prev' (last), 'YYYY-MM', 'all' ---------------- */
+function monthKey(d) {
   const x = new Date(d);
-  return x.getFullYear() === TODAY.getFullYear() && x.getMonth() === TODAY.getMonth();
+  if (Number.isNaN(x.getTime())) return '';
+  return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0');
+}
+/** 'month' / 'prev' / 'YYYY-MM' → 'YYYY-MM'; 'all' (or anything else) → null. */
+function periodMonthKey(period) {
+  if (period === 'month') return monthKey(TODAY);
+  if (period === 'prev') return monthKey(new Date(TODAY.getFullYear(), TODAY.getMonth() - 1, 1));
+  return /^\d{4}-\d{2}$/.test(String(period || '')) ? String(period) : null;
+}
+/** A custom date range period: 'YYYY-MM-DD~YYYY-MM-DD' (inclusive) → {from, to}; anything else → null. */
+function periodRange(period) {
+  const m = String(period || '').match(/^(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
+  if (!m) return null;
+  return m[1] <= m[2] ? { from: m[1], to: m[2] } : { from: m[2], to: m[1] };
+}
+/** Local calendar day of a date as 'YYYY-MM-DD' ('' when there is no date). */
+function dayKey(d) {
+  if (!d) return '';
+  const t = new Date(d);
+  if (Number.isNaN(t.getTime())) return '';
+  return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+}
+const fmtDay = (k) => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); };
+/** Is date `d` inside `period`? Ranges by day, months by month, 'all' always. */
+function inPeriod(d, period) {
+  const r = periodRange(period);
+  if (r) { const k = dayKey(d); return !!k && k >= r.from && k <= r.to; }
+  const mk = periodMonthKey(period);
+  if (!mk) return true;
+  return monthKey(d) === mk;
+}
+/** Is date `d` before the start of `period`? (opening balances) */
+function beforePeriod(d, period) {
+  const r = periodRange(period);
+  if (r) { const k = dayKey(d); return !!k && k < r.from; }
+  const mk = periodMonthKey(period);
+  const dm = monthKey(d);
+  return !!(mk && dm && dm < mk);
+}
+function periodLabel(period) {
+  const r = periodRange(period);
+  if (r) return r.from === r.to ? fmtDay(r.from) : fmtDay(r.from) + ' – ' + fmtDay(r.to);
+  const k = periodMonthKey(period);
+  if (!k) return 'All time';
+  const [y, m] = k.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+}
+/** Months to offer in a picker: the last `count` months, newest first. */
+function recentMonths(count) {
+  const out = [];
+  for (let i = 0; i < (count || 24); i++) out.push(monthKey(new Date(TODAY.getFullYear(), TODAY.getMonth() - i, 1)));
+  return out;
+}
+function inAccountsPeriod(d, period) {
+  return inPeriod(d, period);
 }
 function ensureLedger() {
   if (!Array.isArray(DB.ledger)) DB.ledger = [];
@@ -1228,7 +1633,7 @@ function ledgerCashMoves() {
 }
 function accountsPayload(period) {
   ensureLedger();
-  const p = period === 'all' ? 'all' : 'month';
+  const p = period === 'all' || periodRange(period) ? period : (periodMonthKey(period) || periodMonthKey('month'));
   const rows = [...invoiceCashMoves(), ...purchaseCashMoves(), ...ledgerCashMoves()]
     .filter((r) => inAccountsPeriod(r.on, p))
     .sort((a, b) => new Date(b.on) - new Date(a.on));
@@ -1242,9 +1647,141 @@ function accountsPayload(period) {
   const profit = money_in - money_out;
   const margin = money_in > 0 ? Math.round(profit / money_in * 100) : 0;
   const book_profit = billed - purchases - expenses + other_in;
+  const cats = new Map();
+  rows.forEach((r) => {
+    const c = cats.get(r.category) || { category: r.category, in: 0, out: 0, count: 0 };
+    c[r.direction === 'in' ? 'in' : 'out'] += r.amount; c.count++;
+    cats.set(r.category, c);
+  });
   return {
-    period: p, rows, money_in, money_out, profit, margin, billed, collections, other_in, purchases, expenses, book_profit,
+    period: p, label: periodLabel(p), rows, money_in, money_out, profit, margin, billed, collections, other_in, purchases, expenses, book_profit,
+    by_category: [...cats.values()].sort((a, b) => (b.in + b.out) - (a.in + a.out)),
   };
+}
+/**
+ * A customer's account for a period: opening balance, every invoice and payment
+ * with a running balance, closing balance. Payments come from invoice.payments;
+ * money marked paid without a dated payment is shown on the invoice date.
+ */
+function customerStatement(name, period) {
+  const rng = periodRange(period);
+  const key = rng ? null : periodMonthKey(period);
+  const per = rng ? period : (key || 'all');
+  const all = [];
+  DB.invoices.filter((i) => i.customer?.name === name).forEach((i) => {
+    all.push({ on: i.issue_date, kind: 'invoice', particulars: 'Invoice ' + i.number, ref: i.number, debit: num(i.total), credit: 0 });
+    const pays = (Array.isArray(i.payments) ? i.payments : []).filter((p) => num(p.amount) > 0);
+    let recorded = 0;
+    pays.forEach((p) => {
+      recorded += num(p.amount);
+      all.push({ on: p.on || i.issue_date, kind: 'payment', particulars: 'Payment received', ref: i.number, debit: 0, credit: num(p.amount) });
+    });
+    const gap = Math.round((num(i.paid) - recorded) * 100) / 100;
+    if (gap > 0) all.push({ on: i.issue_date, kind: 'payment', particulars: 'Payment received (date not recorded)', ref: i.number, debit: 0, credit: gap });
+  });
+  const t = (d) => { const x = new Date(d).getTime(); return Number.isNaN(x) ? 0 : x; };
+  all.sort((a, b) => t(a.on) - t(b.on) || (a.kind === 'invoice' ? -1 : 1));
+  let opening = 0; const rows = [];
+  all.forEach((e) => {
+    if (beforePeriod(e.on, per)) { opening += e.debit - e.credit; return; }
+    if (!inPeriod(e.on, per)) return;
+    rows.push(e);
+  });
+  let bal = opening;
+  rows.forEach((e) => { bal += e.debit - e.credit; e.balance = Math.round(bal * 100) / 100; });
+  const sum = (k) => Math.round(rows.reduce((a, e) => a + e[k], 0) * 100) / 100;
+  const activity = buildTimeline(name)
+    .filter((e) => !/^(Invoice |Payment )/.test(e.title || '') && inPeriod(e.t, per)) // money is in the table above
+    .map((e) => ({ on: e.t, title: e.title, detail: e.detail, amount: e.amount, tag: e.tag }));
+  return {
+    name, period: per, label: periodLabel(per), opening: Math.round(opening * 100) / 100, rows,
+    debit: sum('debit'), credit: sum('credit'), closing: Math.round(bal * 100) / 100, activity,
+  };
+}
+/** Everything about one customer, all time, for the "Print full history" sheet. */
+function customerHistory(name) {
+  const mine = (arr) => (arr || []).filter((x) => x && !x.deleted_at && x.customer?.name === name);
+  const t = (d) => { const x = new Date(d).getTime(); return Number.isNaN(x) ? 0 : x; };
+  const byDate = (k) => (a, b) => t(a[k]) - t(b[k]);
+  const invoices = mine(DB.invoices).slice().sort(byDate('issue_date')).map((i) => ({
+    number: i.number, issue_date: i.issue_date, status: i.status, total: num(i.total), paid: num(i.paid),
+    balance: num(i.total) - num(i.paid),
+    payments: (Array.isArray(i.payments) ? i.payments : []).filter((p) => num(p.amount) > 0).map((p) => ({ amount: num(p.amount), on: p.on || i.issue_date })),
+  }));
+  const equipment = mine(DB.equipment).slice().sort(byDate('installed_on')).map((e) => ({
+    name: e.name || e.product?.name, serial: e.serial?.serial_no || '', location: e.location, installed_on: e.installed_on,
+    warranty_end: e.warranty_end, in_warranty: !!e.in_warranty,
+  }));
+  const jobs = mine(DB.jobs).slice().sort(byDate('scheduled_on')).map((j) => ({
+    number: j.number, on: j.scheduled_on, type: j.type, scope: j.scope, technician: j.technician?.name || '', status: j.status,
+  }));
+  const tickets = mine(DB.tickets).map((k) => ({
+    number: k.number, issue: k.issue, priority: k.priority, coverage: k.coverage, assignee: k.assignee?.name || '', status: k.status,
+  }));
+  const repairs = mine(DB.repairs).slice().sort(byDate('received_on'));
+  const amc = mine(DB.amc).slice().sort(byDate('starts_on'));
+  const quotes = mine(DB.quotes).map((q) => ({ number: q.number, scope: q.scope, status: q.status, total: num(q.total) }));
+  const timeline = buildTimeline(name).slice().sort((a, b) => num(a.t) - num(b.t))
+    .map((e) => ({ on: e.t, title: e.title, detail: e.detail, amount: e.amount }));
+  const billed = invoices.reduce((a, i) => a + i.total, 0);
+  const received = invoices.reduce((a, i) => a + i.paid, 0);
+  const firsts = [invoices[0] && invoices[0].issue_date, equipment[0] && equipment[0].installed_on, jobs[0] && jobs[0].on, timeline[0] && timeline[0].on]
+    .filter(Boolean).map(t).filter((x) => x > 0);
+  return {
+    customer: findCust(name),
+    since: firsts.length ? new Date(Math.min(...firsts)).toISOString() : null,
+    summary: { billed, received, balance: billed - received, invoices: invoices.length, quotes: quotes.length, jobs: jobs.length,
+      tickets: tickets.length, repairs: repairs.length, amc: amc.length, equipment: equipment.length },
+    sections: { equipment, jobs, tickets, repairs, amc, quotes, invoices },
+    timeline,
+  };
+}
+/** A print-ready A4 sheet over the app (bills, accounts, statements). */
+function PrintSheet({ title, html, onClose }) {
+  return (
+    <div className="print-host">
+      <div className="print-bar no-print">
+        <span className="ttl">{title} · A4</span>
+        <div style={{ flex: 1 }}></div>
+        <button className="btn-o" onClick={onClose} style={{ background: 'transparent', color: '#fff', borderColor: 'rgba(255,255,255,.3)' }}>Close</button>
+        <button className="btn-p" onClick={() => window.print()}><Ic n="printer" s={14}/>Print A4</button>
+      </div>
+      {SvBill && <style dangerouslySetInnerHTML={{ __html: SvBill.css }}/>}
+      <div className="sheet-wrap"><div className="sheet"><div dangerouslySetInnerHTML={{ __html: html }}/></div></div>
+    </div>
+  );
+}
+/** Month picker: This month / Last month / earlier months / All time. */
+function PeriodPicker({ value, onChange, allowAll = true }) {
+  const months = recentMonths(24);
+  const range = periodRange(value);
+  const isPreset = value === 'month' || value === 'prev' || value === 'all' || !!range;
+  const [custom, setCustom] = useState(!!range);
+  const [from, setFrom] = useState(range ? range.from : dayKey(new Date(TODAY.getFullYear(), TODAY.getMonth(), 1)));
+  const [to, setTo] = useState(range ? range.to : dayKey(TODAY));
+  const applyRange = (f, t) => { if (f && t) onChange(f + '~' + t); };
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+      {[['This month', 'month'], ['Last month', 'prev']].concat(allowAll ? [['All time', 'all']] : []).map(([l, v]) => (
+        <span key={v} className={'chip' + (value === v ? ' on' : '')} onClick={() => { setCustom(false); onChange(v); }}>{l}</span>
+      ))}
+      <select className="inp" style={{ width: 'auto', minWidth: 150, padding: '6px 10px' }} value={isPreset ? '' : value}
+        onChange={(e) => { if (e.target.value) { setCustom(false); onChange(e.target.value); } }} title="Pick a month">
+        <option value="">Pick a month…</option>
+        {months.map((m) => <option key={m} value={m}>{periodLabel(m)}</option>)}
+      </select>
+      <span className={'chip' + (custom || range ? ' on' : '')} onClick={() => { setCustom(true); applyRange(from, to); }}>Custom dates</span>
+      {(custom || range) && (
+        <span className="period-range" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input className="inp" type="date" aria-label="From" value={from} max={to || undefined} style={{ width: 'auto', padding: '6px 8px' }}
+            onChange={(e) => { setFrom(e.target.value); applyRange(e.target.value, to); }}/>
+          <span style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 700 }}>to</span>
+          <input className="inp" type="date" aria-label="To" value={to} min={from || undefined} style={{ width: 'auto', padding: '6px 8px' }}
+            onChange={(e) => { setTo(e.target.value); applyRange(from, e.target.value); }}/>
+        </span>
+      )}
+    </span>
+  );
 }
 // Customer rename cascades to every module that links by name.
 function cascadeCustomerRename(oldName, newName) {
@@ -1296,8 +1833,47 @@ function cascadeTeamRemove(name) {
   DB.repairs.forEach((r) => { if (r.technician?.name === name) r.technician = null; });
 }
 // WhatsApp — opens WhatsApp Web via API; quotes/invoices also generate a PDF for attach.
+/** Send-a-PDF helper for the Android app (app/bill-share.js). */
+const SvShare = (typeof globalThis !== 'undefined' && globalThis.SvShare) || null;
+/**
+ * WhatsApp / share from the Android app. The phone has no shop-PC server inside
+ * it, so it makes the PDF itself and opens the share sheet. (It used to call
+ * ./api/whatsapp/send, which failed on every phone.)
+ */
+async function phoneSend({ customerName, message, kind, doc }) {
+  const cust = findCust(customerName);
+  const phone = (doc && doc.phone) || cust.phone || '';
+  try {
+    if (doc && kind && SvShare && SvBill) {
+      const html = SvBill.sheetHtml(kind, doc, COMPANY, cust, { today: TODAY });
+      const base64 = await SvShare.pdfBase64(html, SvBill.css);
+      return await SvShare.sharePdf({
+        base64, phone, text: message,
+        filename: kind + '-' + (doc.number || 'document') + '.pdf',
+        title: (kind === 'quote' ? 'Quotation ' : 'Bill ') + (doc.number || ''),
+      });
+    }
+    if (!phone) { alert(`No mobile number for "${customerName}". Add one on the customer, or on this bill.`); return null; }
+    window.open('https://wa.me/' + (SvShare ? SvShare.phoneDigits(phone) : String(phone).replace(/\D/g, '')) + '?text=' + encodeURIComponent(message), '_blank');
+    return { ok: true, how: 'whatsapp-text' };
+  } catch (e) {
+    if (/cancel/i.test(String((e && e.message) || e))) return null; // closed the share sheet
+    alert('Could not prepare the PDF: ' + ((e && e.message) || e));
+    return null;
+  }
+}
+/** "Send bill": the bill as a PDF, to the customer's WhatsApp (PC) or via the share sheet (phone). */
+function sendBill(kind, doc) {
+  if (!doc) return null;
+  const name = doc.customer?.name || '';
+  const message = kind === 'quote'
+    ? `Hello ${name},\n\nPlease find your quotation ${doc.number} — ${doc.scope || 'CCTV solution'}.\nTotal: ${inr(doc.total)}\n\nRegards,\n${COMPANY.name}\n${COMPANY.phone}`
+    : `Hello ${name},\n\nPlease find your bill ${doc.number}.\nTotal: ${inr(doc.total)} · Paid: ${inr(doc.paid)} · Balance due: ${inr(num(doc.total) - num(doc.paid))}\n\nThank you,\n${COMPANY.name}\n${COMPANY.phone}`;
+  return waSend({ customerName: name, message, kind, doc });
+}
 async function waSend({ customerName, message, kind, doc }) {
   if (!customerName) return;
+  if (isApkShell()) return phoneSend({ customerName, message, kind, doc });
   try {
     const res = await fetch('./api/whatsapp/send', {
       method: 'POST',
@@ -1390,13 +1966,14 @@ function ledgerCatNames() {
 
 const ENTITIES = {
   lead: { label: 'Lead', fields: [
-    { key: 'name', label: 'Lead name' }, { key: 'requirement', label: 'Requirement', type: 'textarea' },
+    { key: 'name', label: 'Lead name' }, { key: 'phone', label: 'Mobile' },
+    { key: 'requirement', label: 'Requirement', type: 'textarea' },
     { key: 'value', label: 'Estimated value (₹)', type: 'number' },
     { key: 'source', label: 'Source', type: 'select', options: ['Referral', 'IndiaMART', 'JustDial', 'Existing', 'Walk-in'] },
     { key: 'segment', label: 'Segment', type: 'select', options: ['Residential', 'Commercial', 'Industrial'] },
     { key: 'owner', label: 'Owner', type: 'select', options: teamNames },
     { key: 'stage', label: 'Stage', type: 'select', options: [['0', 'Enquiry'], ['1', 'Survey'], ['2', 'Quoted'], ['3', 'Negotiation'], ['4', 'Won']], default: '0' },
-  ], create: (v) => DB.leads.push({ id: nextId(DB.leads), name: v.name, requirement: v.requirement, value: num(v.value), source: v.source || 'Referral', segment: v.segment || 'Commercial', owner: O(v.owner || teamNames()[0]), stage: num(v.stage) }) },
+  ], create: (v) => DB.leads.push({ id: nextId(DB.leads), name: v.name, phone: v.phone || '', requirement: v.requirement, value: num(v.value), source: v.source || 'Referral', segment: v.segment || 'Commercial', owner: O(v.owner || teamNames()[0]), stage: num(v.stage) }) },
   quote: { label: 'Quotation', fields: [
     { key: 'customer', label: 'Customer', type: 'select', options: custNames },
     { key: 'scope', label: 'Scope', type: 'textarea' }, { key: 'total', label: 'Value (₹)', type: 'number' },
@@ -1415,11 +1992,13 @@ const ENTITIES = {
     { key: 'total', label: 'Total (₹)', type: 'number' },
     { key: 'status', label: 'Status', type: 'select', options: ['sent', 'partial', 'paid', 'overdue', 'draft'], default: 'sent' },
     { key: 'due_days', label: 'Due in (days)', type: 'number', default: 15 },
-  ], create: (v) => { const inv = createInvoice({ customer: v.customer, total: num(v.total), dueDays: num(v.due_days) || 15 }); if (inv && v.status && v.status !== 'sent') inv.status = v.status; return inv != null; } },
+    { key: 'phone', label: 'Mobile on this bill (blank = customer\u2019s number)' },
+  ], create: (v) => { const inv = createInvoice({ customer: v.customer, total: num(v.total), dueDays: num(v.due_days) || 15 }); if (inv && v.status && v.status !== 'sent') inv.status = v.status; if (inv) inv.phone = String(v.phone || '').trim(); return inv != null; } },
   customer: { label: 'Customer', fields: [
     { key: 'name', label: 'Customer name' }, { key: 'area', label: 'Area' },
     { key: 'type', label: 'Type', type: 'select', options: ['Residential', 'Commercial', 'Industrial'], default: 'Commercial' },
     { key: 'contact_name', label: 'Contact person' }, { key: 'phone', label: 'Phone' },
+    { key: 'gstin', label: 'GSTIN (business customers)' },
     { key: 'sites', label: 'Sites', type: 'number', default: 1 },
     { key: 'owner', label: 'Owner', type: 'select', options: teamNames },
   ], create: (v) => {
@@ -1429,7 +2008,7 @@ const ENTITIES = {
       alert(`A customer named "${nm}" already exists — open that record instead of creating a duplicate.`);
       return false;
     }
-    DB.customers.push({ id: nextId(DB.customers), name: nm, area: v.area, type: v.type || 'Commercial', contact_name: v.contact_name, phone: v.phone, sites: num(v.sites) || 1, owner: O(v.owner || teamNames()[0]), lifetime_value: 0 });
+    DB.customers.push({ id: nextId(DB.customers), name: nm, area: v.area, type: v.type || 'Commercial', contact_name: v.contact_name, phone: v.phone, gstin: cleanGstin(v.gstin), sites: num(v.sites) || 1, owner: O(v.owner || teamNames()[0]), lifetime_value: 0 });
     return true;
   } },
   job: { label: 'Job', fields: [
@@ -1457,13 +2036,23 @@ const ENTITIES = {
     { key: 'end_days', label: 'Ends in (days)', type: 'number', default: 365 },
   ], create: (v) => { const ed = num(v.end_days); const a = { id: nextId(DB.amc), number: genNum('AMC-', DB.amc, 5000), customer: O(v.customer), plan: v.plan || 'silver', devices: num(v.devices), value: num(v.value), starts_on: iso(ed - 365), ends_on: iso(ed), visits_total: num(v.visits_total) || 4, visits_used: 0, status: ed < 0 ? 'expired' : ed < 30 ? 'expiring' : 'active' }; DB.amc.push(a); if (a.value > 0) { const inv = createInvoice({ customer: v.customer, total: a.value, note: 'AMC ' + a.number + ' — annual charge', issueStock: false }); if (inv) a.invoice_number = inv.number; } } },
   product: { label: 'Product', fields: [
-    { key: 'sku', label: 'SKU' }, { key: 'name', label: 'Product name' }, { key: 'specs', label: 'Specs' },
+    { key: 'sku', label: 'SKU' }, { key: 'name', label: 'Product name' },
     { key: 'category', label: 'Category', type: 'select', options: ['Cameras', 'Recorders', 'Storage', 'Cables & Power'], default: 'Cameras' },
     { key: 'purchase_price', label: 'Purchase price (₹)', type: 'number' }, { key: 'sale_price', label: 'Sale price (₹)', type: 'number' },
-    { key: 'stock', label: 'Stock', type: 'number', min: 0, default: 0 }, { key: 'reserved', label: 'Reserved', type: 'number', default: 0 },
-    { key: 'reorder_level', label: 'Reorder level', type: 'number', default: 0 },
-    { key: 'track_serials', label: 'Serial tracked', type: 'select', options: ['Yes', 'No'], default: 'No' },
-  ], create: (v) => DB.products.push({ id: nextId(DB.products), sku: v.sku, name: v.name, specs: v.specs, category: v.category || 'Cameras', purchase_price: num(v.purchase_price), sale_price: num(v.sale_price), stock: num(v.stock), reserved: num(v.reserved), reorder_level: num(v.reorder_level), track_serials: v.track_serials === 'Yes' }) },
+    { key: 'stock', label: 'Stock', type: 'number', min: 0, default: 0 },
+    { key: 'gst_rate', label: 'GST rate (%)', type: 'select', options: () => GST_RATES.map(String), default: '18' },
+    { key: 'hsn', label: 'HSN code', more: true },
+    { key: 'unit', label: 'Unit', type: 'select', options: () => UNITS, default: 'Nos', more: true },
+    { key: 'barcode', label: 'Barcode', more: true },
+    { key: 'mrp', label: 'MRP (₹)', type: 'number', more: true },
+    { key: 'specs', label: 'Specs', more: true },
+    { key: 'reorder_level', label: 'Reorder level', type: 'number', default: 0, more: true },
+    { key: 'reserved', label: 'Reserved', type: 'number', default: 0, more: true },
+    { key: 'track_serials', label: 'Serial tracked', type: 'select', options: ['Yes', 'No'], default: 'No', more: true },
+  ], create: (v) => {
+    if (!String(v.name || '').trim()) { alert('Enter a product name.'); return false; }
+    DB.products.push(Object.assign({ id: nextId(DB.products) }, productFieldsFromForm(v), { stock: num(v.stock), reserved: num(v.reserved) }));
+  } },
   serial: { label: 'Serial', fields: [
     { key: 'serial_no', label: 'Serial number' },
     { key: 'product', label: 'Product', type: 'select', options: prodNames },
@@ -1577,19 +2166,60 @@ const ENTITY_STORE = {
   equipment: 'equipment', repair: 'repairs', ledger: 'ledger',
 };
 const pendingDeletes = [];
+/** Serial + equipment records that would be orphaned by deleting this product. */
+function productLinkCount(product) {
+  if (!product) return 0;
+  const target = productRefKeys(product);
+  const hit = (ref) => {
+    const keys = productRefKeys(ref);
+    return keys.length > 0 && keys.some((k) => target.indexOf(k) >= 0);
+  };
+  let n = 0;
+  (DB.serials || []).forEach((s) => { if (s && !s.deleted_at && hit(s.product)) n++; });
+  (DB.equipment || []).forEach((e) => { if (e && !e.deleted_at && (hit(e.product) || hit(e.name))) n++; });
+  return n;
+}
 function entityDelete(entity, id) {
   const table = ENTITY_STORE[entity];
   if (!table || !Array.isArray(DB[table])) return false;
   const i = DB[table].findIndex((x) => x.id === id);
   if (i < 0) return false;
   const row = DB[table][i];
+  if (entity === 'product') {
+    // Nothing used to stop this, and the orphaned serials then matched no
+    // product at all — which is exactly what "can't find it by serial" looks like.
+    const links = productLinkCount(row);
+    if (links > 0 && typeof confirm === 'function'
+      && !confirm(`"${row.name}" still has ${links} serial / equipment record(s). Deleting it leaves them pointing at no product, so those units can no longer be found by serial number. Delete anyway?`)) {
+      return false;
+    }
+  }
   if (Erp) {
     Erp.tombstone(row, getDeviceId());
+    // Saved with the data, so the delete survives an app restart before the next
+    // sync, and a device that still has the record can't bring it back.
+    Erp.addTombstone({ DB, TEAM, CATALOG, COMPANY }, table, row, getDeviceId(), row.deleted_at);
     pendingDeletes.push({ table, uuid: row.uuid, deleted_at: row.deleted_at, updated_at: row.updated_at });
   }
   DB[table].splice(i, 1);
   afterMutation();
   return true;
+}
+// GST slabs since 22 Sep 2025 (12% and 28% were abolished). Old bills keep the rate they were made with.
+const GST_RATES = [0, 5, 18, 40];
+const UNITS = ['Nos', 'Mtr', 'Roll', 'Box', 'Set', 'Pair', 'Kg'];
+const cleanGstin = (g) => String(g || '').replace(/\s+/g, '').toUpperCase();
+/** The product fields a form sets (create and edit share this). */
+function productFieldsFromForm(v, row) {
+  const r = row || {};
+  const rate = v.gst_rate === '' || v.gst_rate == null ? (r.gst_rate ?? COMPANY.default_gst_rate ?? 18) : num(v.gst_rate);
+  return {
+    sku: String(v.sku || '').trim(), name: String(v.name || '').trim(), specs: v.specs || '',
+    category: v.category || r.category || 'Cameras', unit: v.unit || r.unit || 'Nos',
+    hsn: String(v.hsn || '').trim(), gst_rate: rate, barcode: String(v.barcode || '').replace(/\s+/g, ''), mrp: num(v.mrp),
+    purchase_price: num(v.purchase_price), sale_price: num(v.sale_price),
+    reorder_level: num(v.reorder_level), track_serials: v.track_serials === 'Yes',
+  };
 }
 function entityEditFields(entity) {
   const cfg = ENTITIES[entity];
@@ -1654,6 +2284,7 @@ function entityEditFields(entity) {
     { key: 'status', label: 'Status', type: 'select', options: ['sent', 'partial', 'paid', 'overdue', 'draft'] },
     { key: 'issue_date', label: 'Issue date (YYYY-MM-DD)' },
     { key: 'due_date', label: 'Due date (YYYY-MM-DD)' },
+    { key: 'phone', label: 'Mobile on this bill (blank = customer\u2019s number)' },
     { key: 'note', label: 'Note' },
   ];
   if (entity === 'product') return cfg.fields;
@@ -1694,6 +2325,7 @@ function entityToInitial(entity, r) {
   };
   if (entity === 'product') return {
     sku: r.sku || '', name: r.name || '', specs: r.specs || '', category: r.category || 'Cameras',
+    unit: r.unit || 'Nos', hsn: r.hsn || '', gst_rate: String(r.gst_rate ?? COMPANY.default_gst_rate ?? 18), barcode: r.barcode || '', mrp: r.mrp ?? '',
     purchase_price: r.purchase_price, sale_price: r.sale_price, stock: r.stock, reserved: r.reserved,
     reorder_level: r.reorder_level, track_serials: r.track_serials ? 'Yes' : 'No',
   };
@@ -1709,16 +2341,21 @@ function entityToInitial(entity, r) {
     charge: r.charge, status: r.status || 'received',
   };
   if (entity === 'lead') return {
-    name: r.name || '', requirement: r.requirement || '', value: r.value, source: r.source || '',
+    name: r.name || '', phone: r.phone || '', requirement: r.requirement || '', value: r.value, source: r.source || '',
     segment: r.segment || '', owner: r.owner?.name || '', stage: String(r.stage ?? 0),
   };
   if (entity === 'quote') return {
     customer: r.customer?.name || '', scope: r.scope || '', total: r.total, status: r.status || 'draft',
     owner: r.owner?.name || '', valid_till: r.valid_till || '',
   };
+  if (entity === 'customer') return {
+    name: r.name || '', area: r.area || '', type: r.type || 'Commercial',
+    contact_name: r.contact_name || '', phone: r.phone || '', gstin: r.gstin || '', sites: r.sites || 1,
+    owner: r.owner?.name || '',
+  };
   if (entity === 'invoice') return {
     customer: r.customer?.name || '', total: r.total, paid: r.paid, status: r.status || 'sent',
-    issue_date: r.issue_date || '', due_date: r.due_date || '', note: r.note || '',
+    issue_date: r.issue_date || '', due_date: r.due_date || '', phone: r.phone || '', note: r.note || '',
   };
   if (entity === 'ledger') return {
     direction: r.direction || 'in', category: r.category || 'Miscellaneous', amount: r.amount,
@@ -1770,11 +2407,7 @@ function entityApplyEdit(entity, row, v) {
   if (entity === 'product') {
     if (Erp) Erp.recomputeStock({ DB, TEAM, CATALOG, COMPANY });
     const prev = num(row.stock);
-    Object.assign(row, {
-      sku: v.sku, name: v.name, specs: v.specs, category: v.category || row.category,
-      purchase_price: num(v.purchase_price), sale_price: num(v.sale_price),
-      reserved: num(v.reserved), reorder_level: num(v.reorder_level), track_serials: v.track_serials === 'Yes',
-    });
+    Object.assign(row, productFieldsFromForm(v, row), { reserved: num(v.reserved) });
     const next = Math.max(0, num(v.stock));
     if (next !== prev) recordStockMove(row, next - prev, 'adjust', row.sku);
     else row.stock = next;
@@ -1808,7 +2441,7 @@ function entityApplyEdit(entity, row, v) {
   }
   if (entity === 'lead') {
     Object.assign(row, {
-      name: v.name, requirement: v.requirement, value: num(v.value), source: v.source || row.source,
+      name: v.name, phone: v.phone || '', requirement: v.requirement, value: num(v.value), source: v.source || row.source,
       segment: v.segment || row.segment, owner: O(v.owner || teamNames()[0]), stage: num(v.stage),
     });
     return;
@@ -1822,11 +2455,27 @@ function entityApplyEdit(entity, row, v) {
     if (v.status === 'accepted' && !row.converted) convertQuote(row);
     return;
   }
+  if (entity === 'customer') {
+    const newName = String(v.name || '').trim();
+    if (newName && newName !== row.name) {
+      const clash = DB.customers.some((x) => x.id !== row.id && String(x.name || '').toLowerCase() === newName.toLowerCase());
+      if (clash) { alert(`Another customer named "${newName}" already exists.`); return; }
+      cascadeCustomerRename(row.name, newName);
+      row.name = newName;
+    }
+    Object.assign(row, {
+      gstin: cleanGstin(v.gstin),
+      area: v.area, type: v.type || row.type, contact_name: v.contact_name,
+      phone: v.phone, sites: num(v.sites) || 1, owner: O(v.owner || row.owner?.name || teamNames()[0]),
+    });
+    return;
+  }
   if (entity === 'invoice') {
     const normItems = v.items ? normalizeQuoteItems(v.items) : (row.items || []);
     Object.assign(row, {
       customer: O(v.customer), total: num(v.total), paid: num(v.paid), status: v.status || row.status,
       issue_date: v.issue_date || row.issue_date, due_date: v.due_date || row.due_date, note: v.note || '',
+      phone: String(v.phone || '').trim(),
       items: normItems,
     });
     row.balance = row.total - row.paid;
@@ -1847,6 +2496,8 @@ function entityApplyEdit(entity, row, v) {
 }
 
 function FormModal({ title, fields, submitLabel = 'Save', initial, onClose, onSave, busy = false }) {
+  const [showMore, setShowMore] = useState(false);
+  const moreCount = fields.filter((f) => f.more).length;
   const [form, setForm] = useState(() => {
     const o = { ...(initial || {}) };
     fields.forEach((f) => { if (o[f.key] === undefined) o[f.key] = f.default ?? ''; });
@@ -1857,7 +2508,7 @@ function FormModal({ title, fields, submitLabel = 'Save', initial, onClose, onSa
     <div className="scrim show" style={{ zIndex: 60 }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 380, maxWidth: '92vw', maxHeight: '88vh', overflowY: 'auto', background: 'var(--card)', border: '1px solid var(--ln)', borderRadius: 16, padding: '22px 22px 18px', boxShadow: '0 20px 60px rgba(40,35,20,.22)', zIndex: 61 }}>
         <div style={{ fontSize: 16, fontWeight: 800, letterSpacing: '-.01em', marginBottom: 6 }}>{title}</div>
-        {fields.map((f) => {
+        {fields.filter((f) => !f.more || showMore).map((f) => {
           const opts = typeof f.options === 'function' ? f.options() : f.options;
           return (
             <div key={f.key}>
@@ -1875,6 +2526,11 @@ function FormModal({ title, fields, submitLabel = 'Save', initial, onClose, onSa
             </div>
           );
         })}
+        {moreCount > 0 && (
+          <button type="button" className="btn-g" style={{ marginTop: 12, paddingLeft: 0 }} onClick={() => setShowMore((x) => !x)}>
+            {showMore ? 'Fewer details' : `More details (${moreCount})`}
+          </button>
+        )}
         <div style={{ display: 'flex', gap: 9, marginTop: 18 }}>
           <button className="btn-o" style={{ flex: 1, justifyContent: 'center' }} disabled={busy} onClick={onClose}>Cancel</button>
           <button className="btn-p" style={{ flex: 1, justifyContent: 'center' }} disabled={busy} onClick={() => onSave(form)}>{busy ? 'Saving…' : submitLabel}</button>
@@ -2044,8 +2700,10 @@ function Shell({ active, children }) {
           <button className="hamb" onClick={() => setSbOpen(true)}><Ic n="grid" s={18}/></button>
           <div className="srch" style={{ position: 'relative' }}>
             <Ic n="search" s={15}/>
-            <input placeholder="Search products, SKU, customers, invoices…"
-              value={q} onChange={(e) => setQ(e.target.value)} onBlur={() => setTimeout(() => setResults(null), 220)}/>
+            <input placeholder="Search products, SKU, serial, customers, invoices…"
+              value={q} onChange={(e) => setQ(e.target.value)}
+              onFocus={() => { if (q.length >= 1) api.get('/search?q=' + encodeURIComponent(q)).then((r) => setResults(r.results)).catch(() => {}); }}
+              onBlur={() => setTimeout(() => setResults(null), 220)}/>
             {results && <SearchResults results={results} onPick={(path) => { setQ(''); setResults(null); nav(path); }}/>}
           </div>
           <div className="spacer" style={{ flex: 1 }}></div>
@@ -2078,22 +2736,24 @@ function Shell({ active, children }) {
 }
 function SearchResults({ results, onPick }) {
   const groups = [
-    ['products', 'Inventory', (r) => `/inventory?open=${r.id}`, (r) => `${r.sku} — ${r.name}${num(r.stock) <= 0 ? ' · out of stock' : ' · ' + r.stock + ' in stock'}`],
+    ['products', 'Inventory', (r) => `/inventory?open=${r.id}`, (r) => `${r.sku} — ${r.name}${(r.matched_serials || []).length ? ' · SN ' + r.matched_serials.join(', ') : ''}${num(r.stock) <= 0 ? ' · out of stock' : ' · ' + r.stock + ' in stock'}`],
     ['customers', 'Customers', (r) => `/customers?open=${r.id}`, (r) => r.name],
     ['invoices', 'Invoices', (r) => `/invoices?open=${r.id}`, (r) => r.number],
-    ['serials', 'Serials', (r) => `/serials?open=${r.id}`, (r) => r.serial_no],
+    ['serials', 'Serials', (r) => `/serials?open=${r.id}`, (r) => `${r.serial_no} · ${r.product?.name || r.product || ''}`],
     ['tickets', 'Tickets', (r) => `/tickets?open=${r.id}`, (r) => `${r.number} — ${r.issue}`],
     ['leads', 'Leads', (r) => `/leads?open=${r.id}`, (r) => r.name],
   ];
   const any = groups.some(([k]) => (results[k] || []).length);
   return (
-    <div style={{ position: 'absolute', top: 44, left: 0, right: 0, background: '#fff', border: '1px solid var(--ln)', borderRadius: 10, boxShadow: '0 8px 30px rgba(40,35,20,.14)', zIndex: 50, maxHeight: 380, overflowY: 'auto' }}>
+    <div
+      onMouseDown={(e) => e.preventDefault()}
+      style={{ position: 'absolute', top: 44, left: 0, right: 0, background: '#fff', border: '1px solid var(--ln)', borderRadius: 10, boxShadow: '0 8px 30px rgba(40,35,20,.14)', zIndex: 50, maxHeight: 380, overflowY: 'auto' }}>
       {!any && <div className="empty" style={{ padding: 20 }}>No matches</div>}
       {groups.map(([k, label, path, text]) => (results[k] || []).length ? (
         <div key={k}>
           <div className="sg" style={{ padding: '8px 12px 4px' }}>{label}</div>
           {results[k].map((r) => (
-            <button key={r.id} className="sn" style={{ borderRadius: 0 }} onMouseDown={() => onPick(path(r))}>{text(r)}</button>
+            <button key={r.id} className="sn" style={{ borderRadius: 0 }} onClick={() => onPick(path(r))}>{text(r)}</button>
           ))}
         </div>
       ) : null)}
@@ -2235,110 +2895,34 @@ function TablePage({ active, title, sub, endpoint, columns, rowToRecord, stats, 
 const findCust = (name) => DB.customers.find((c) => c.name === name) || {};
 const waNumber = (phone) => { const d = String(phone || '').replace(/\D/g, ''); return d ? ('91' + d.replace(/^91/, '')) : ''; };
 
-function Letterhead() {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '2px solid #102a43', paddingBottom: 12, marginBottom: 18 }}>
-      <img src={COMPANY.logo} alt={COMPANY.name} style={{ height: 62, maxWidth: 280, objectFit: 'contain' }}/>
-      <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.55, color: '#3a4147' }}>
-        <div style={{ fontWeight: 800, fontSize: 13, color: '#102a43' }}>{COMPANY.name}</div>
-        <div>{COMPANY.address}</div>
-        <div>{COMPANY.phone} · {COMPANY.email}</div>
-        <div>{COMPANY.web}{COMPANY.gstin ? ' · GSTIN ' + COMPANY.gstin : ''}</div>
-        <div>{COMPANY.address}</div>
-        <div>{COMPANY.phone} · {COMPANY.email}</div>
-        <div>{COMPANY.web}</div>
-      </div>
-    </div>
-  );
+/* The printed bill / quotation. Its markup comes from app/bill-format.js — the
+   same builder the shop PC uses for the WhatsApp PDF — so the two documents can
+   no longer drift apart (they did: this copy printed the address twice). */
+function BillSheet({ kind, doc }) {
+  if (!SvBill) {
+    return <div style={{ padding: 24, color: '#c0392b', fontWeight: 700 }}>Bill layout is missing (app/bill-format.js was not loaded).</div>;
+  }
+  const html = SvBill.sheetHtml(kind, doc, COMPANY, findCust(doc.customer?.name), { today: TODAY });
+  return <div dangerouslySetInnerHTML={{ __html: html }}/>;
 }
-function PartyBlock({ label, doc }) {
-  const c = findCust(doc.customer?.name);
+/** Shown right after a bill is created: send it to the customer, print it, or carry on. */
+function BillSaved({ doc, onPrint, onClose }) {
+  const [busy, setBusy] = useState(false);
+  const send = async () => { setBusy(true); try { await sendBill('invoice', doc); } finally { setBusy(false); } };
+  const phone = doc.phone || findCust(doc.customer?.name).phone || '';
   return (
-    <div>
-      <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '.08em', color: '#8b8577' }}>{label}</div>
-      <div style={{ fontWeight: 800, fontSize: 14, marginTop: 4 }}>{doc.customer?.name}</div>
-      <div style={{ fontSize: 11, color: '#5d6470', marginTop: 2 }}>{[c.area, c.contact_name].filter(Boolean).join(' · ')}</div>
-      <div style={{ fontSize: 11, color: '#5d6470' }}>{c.phone || ''}</div>
-    </div>
-  );
-}
-function ItemTable({ items }) {
-  return (
-    <table className="sh-table">
-      <thead><tr><th style={{ width: 30 }}>#</th><th>Description</th><th className="num" style={{ width: 110 }}>Amount</th></tr></thead>
-      <tbody>{items.map((it, i) => (
-        <tr key={i}><td>{i + 1}</td><td>{it.description}</td><td className="num">{it.amount > 0 ? inr(it.amount) : 'incl.'}</td></tr>
-      ))}</tbody>
-    </table>
-  );
-}
-function Totals({ total, extraRows }) {
-  const taxable = Math.round(total / 1.18); const gst = total - taxable;
-  return (
-    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-      <div style={{ width: 270, fontSize: 12 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0' }}><span style={{ color: '#5d6470' }}>Taxable value</span><b>{inr(taxable)}</b></div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0' }}><span style={{ color: '#5d6470' }}>GST @ 18%</span><b>{inr(gst)}</b></div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: '1px solid #ddd', marginTop: 4, fontSize: 14 }}><b>Grand Total</b><b style={{ color: '#102a43' }}>{inr(total)}</b></div>
-        {extraRows}
-      </div>
-    </div>
-  );
-}
-function QuoteSheet({ doc }) {
-  const items = doc.items?.length ? doc.items : [{ description: doc.scope || 'CCTV solution', amount: doc.total }];
-  return (
-    <div>
-      <Letterhead/>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14 }}>
-        <PartyBlock label="QUOTATION FOR" doc={doc}/>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-.02em', color: '#102a43' }}>QUOTATION</div>
-          <div style={{ fontSize: 11, color: '#3a4147', marginTop: 6, lineHeight: 1.6 }}>
-            <div><b>{doc.number}</b></div><div>Date: {date(iso(0))}</div><div>Valid till: {date(doc.valid_till)}</div>
-          </div>
+    <div className="scrim show" style={{ zIndex: 60 }} onClick={onClose}>
+      <div className="bill-saved" onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 380, maxWidth: '92vw', background: 'var(--card)', border: '1px solid var(--ln)', borderRadius: 16, padding: '22px 22px 18px', boxShadow: '0 20px 60px rgba(40,35,20,.22)', zIndex: 61 }}>
+        <div style={{ fontSize: 16, fontWeight: 800 }}>Bill {doc.number} saved</div>
+        <div style={{ fontSize: 13, color: 'var(--mut)', fontWeight: 600, marginTop: 4, lineHeight: 1.45 }}>
+          {doc.customer?.name} · {inr(doc.total)}{phone ? ' · ' + phone : ' · no mobile number on file'}
         </div>
-      </div>
-      <ItemTable items={items}/>
-      <Totals total={doc.total}/>
-      <div className="sh-terms">
-        <b>Terms &amp; Conditions</b><br/>
-        {COMPANY.extras}<br/>
-        {COMPANY.quoteTerms}
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 34 }}>
-          <span>Customer acceptance</span>
-          <span style={{ textAlign: 'right' }}>For <b>{COMPANY.name}</b><br/><br/>Authorised Signatory</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-function InvoiceSheet({ doc }) {
-  const items = doc.items?.length ? doc.items : [{ description: 'CCTV Supply, Installation & Commissioning', amount: doc.total }];
-  const extra = (
-    <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0' }}><span style={{ color: '#1a7f4b' }}>Received</span><b style={{ color: '#1a7f4b' }}>{inr(doc.paid)}</b></div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', fontSize: 13 }}><b>Balance Due</b><b style={{ color: doc.balance ? '#c0392b' : '#1a7f4b' }}>{inr(doc.balance)}</b></div>
-    </>
-  );
-  return (
-    <div>
-      <Letterhead/>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14 }}>
-        <PartyBlock label="BILL TO" doc={doc}/>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-.02em', color: '#102a43' }}>TAX INVOICE</div>
-          <div style={{ fontSize: 11, color: '#3a4147', marginTop: 6, lineHeight: 1.6 }}>
-            <div><b>{doc.number}</b></div><div>Issued: {date(doc.issue_date)}</div><div>Due: {date(doc.due_date)}</div>
-          </div>
-        </div>
-      </div>
-      <ItemTable items={items}/>
-      <Totals total={doc.total} extraRows={extra}/>
-      <div className="sh-terms">
-        {COMPANY.invoiceTerms} {COMPANY.extras}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 34 }}>
-          <span style={{ textAlign: 'right' }}>For <b>{COMPANY.name}</b><br/><br/>Authorised Signatory</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 16 }}>
+          <button className="btn-p wa-btn" style={{ justifyContent: 'center' }} disabled={busy} onClick={send}>
+            <Ic n="whatsapp" s={14}/>{busy ? 'Preparing PDF…' : (isApkShell() ? 'Send bill (share PDF)' : 'Send bill on WhatsApp')}
+          </button>
+          <button className="btn-o" style={{ justifyContent: 'center' }} onClick={onPrint}><Ic n="printer" s={14}/>Print</button>
+          <button className="btn-g" style={{ justifyContent: 'center' }} onClick={onClose}>Done</button>
         </div>
       </div>
     </div>
@@ -2353,7 +2937,8 @@ function PrintHost({ kind, doc, onClose }) {
         <button className="btn-o" onClick={onClose} style={{ background: 'transparent', color: '#fff', borderColor: 'rgba(255,255,255,.3)' }}>Close</button>
         <button className="btn-p" onClick={() => window.print()}><Ic n="printer" s={14}/>Print A4</button>
       </div>
-      <div className="sheet-wrap"><div className="sheet">{kind === 'quote' ? <QuoteSheet doc={doc}/> : <InvoiceSheet doc={doc}/>}</div></div>
+      {SvBill && <style dangerouslySetInnerHTML={{ __html: SvBill.css }}/>}
+      <div className="sheet-wrap"><div className="sheet"><BillSheet kind={kind} doc={doc}/></div></div>
     </div>
   );
 }
@@ -2905,7 +3490,9 @@ function Invoices() {
     await commitChange();
     setPayFor(null); reload(); reloadStats();
   };
+  const [made, setMade] = useState(null); // the bill just created → "Send / Print"
   const saveInvoice = async (v) => {
+    let justMade = null;
     const items = normalizeQuoteItems(v.items);
     const total = items.reduce((a, i) => a + i.amount, 0) || num(v.total);
     if (v.editing) {
@@ -2925,9 +3512,11 @@ function Invoices() {
     } else {
       const inv = createInvoice({ customer: v.customer, total, items, dueDays: v.dueDays, note: v.note, persist: false });
       if (!inv) return;
+      justMade = inv;
     }
     await commitChange();
     setInvoiceBuilder(null);
+    if (justMade) setMade(justMade);
     setRec(null);
     reload();
     reloadStats();
@@ -2964,6 +3553,7 @@ function Invoices() {
       })}><Ic n="sliders" s={14}/>Edit</button>
       <button className="btn-o" style={{ color: 'var(--red)' }} onClick={async () => { if (confirm(`Delete invoice ${r.number}?`)) { entityDelete('invoice', r.id); await afterMutation(); setRec(null); reload(); reloadStats(); } }}>Delete</button>
       <button className="btn-o" onClick={() => setPrintDoc(r)}><Ic n="printer" s={14}/>Print</button>
+      <button className="btn-o wa-btn" onClick={() => sendBill('invoice', r)}><Ic n="whatsapp" s={14}/>Send bill</button>
       <button className="btn-o wa-btn" onClick={() => whatsapp(r)}><Ic n="whatsapp" s={14}/>Remind</button>
       <button className="btn-p" onClick={() => { setRec(null); setPayFor(r); }}><Ic n="check" s={14} sw={2.4}/>Record Payment</button>
     </>,
@@ -3009,6 +3599,7 @@ function Invoices() {
         initial={invoiceBuilder.initial} editing={invoiceBuilder.editing} onClose={() => setInvoiceBuilder(null)}
         onSave={(v) => saveInvoice({ ...v, editing: invoiceBuilder.editing })}/>}
       {printDoc && <PrintHost kind="invoice" doc={printDoc} onClose={() => setPrintDoc(null)}/>}
+      {made && <BillSaved doc={made} onPrint={() => { setPrintDoc(made); setMade(null); }} onClose={() => setMade(null)}/>}
       <Drawer rec={rec} onClose={() => setRec(null)}/>
     </Shell>
   );
@@ -3047,6 +3638,7 @@ function Accounts() {
   const [rec, setRec] = useState(null);
   const [editRow, setEditRow] = useState(null);
   const { data, loading, reload } = useFetch('/accounts?period=' + period, [period]);
+  const [sheet, setSheet] = useState(false);
   const rows = (data?.rows || []).filter((r) => !dir || r.direction === dir);
   const today = iso(0).slice(0, 10);
 
@@ -3082,7 +3674,8 @@ function Accounts() {
 
   return (
     <Shell active="accounts">
-      <PageHead title="Accounts" sub="Money in, money out & profit">
+      <PageHead title="Accounts" sub={'Money in, money out & profit · ' + (data ? data.label : periodLabel(period))}>
+        <button className="btn-o" disabled={!data || !SvBill} onClick={() => setSheet(true)}><Ic n="printer" s={14}/>Print</button>
         <CreateButton entity="ledger" label="Money in" className="btn-p" initial={{ direction: 'in', category: 'Other income', on: today }} onDone={reload}/>
         <CreateButton entity="ledger" label="Money out" className="btn-o" initial={{ direction: 'out', category: 'Rent', on: today }} onDone={reload}/>
       </PageHead>
@@ -3093,9 +3686,7 @@ function Accounts() {
         <Stat n="BOOK PROFIT" v={lakh(data.book_profit)} s="billed − purchases − expenses"/>
       </StatRow>}
       <div className="chips">
-        {[['This month', 'month'], ['All time', 'all']].map(([l, v]) => (
-          <span key={v} className={'chip' + (period === v ? ' on' : '')} onClick={() => setPeriod(v)}>{l}</span>
-        ))}
+        <PeriodPicker value={period} onChange={setPeriod}/>
         {[['All entries', null], ['In', 'in'], ['Out', 'out']].map(([l, v]) => (
           <span key={l} className={'chip' + (dir === v ? ' on' : '')} onClick={() => setDir(v)}>{l}</span>
         ))}
@@ -3138,6 +3729,7 @@ function Accounts() {
           if (row) entityApplyEdit('ledger', row, v);
           await afterMutation(); setEditRow(null); setRec(null); reload();
         }}/>}
+          {sheet && data && <PrintSheet title={'Accounts · ' + data.label} html={SvBill.accountsHtml(data, COMPANY, { dir })} onClose={() => setSheet(false)}/>}
     </Shell>
   );
 }
@@ -3162,7 +3754,8 @@ function buildTimeline(name) {
     if (Array.isArray(i.payments) && i.payments.length) {
       i.payments.forEach((p) => ev.push({ t: new Date(p.on).getTime(), icon: 'check', tone: 'green', title: 'Payment received', detail: `Against ${i.number}`, amount: p.amount, tag: 'paid' }));
     } else if (i.paid > 0) {
-      ev.push({ t: new Date(i.issue_date).getTime() + 2 * 864e5, icon: 'check', tone: 'green', title: 'Payment received', detail: `Against ${i.number}`, amount: i.paid, tag: 'paid' });
+      // No dated payment on record: show it on the invoice date, like Accounts and the statement do (was: a made-up date 2 days later).
+      ev.push({ t: new Date(i.issue_date).getTime(), icon: 'check', tone: 'green', title: 'Payment received', detail: `Against ${i.number} (date not recorded)`, amount: i.paid, tag: 'paid' });
     }
   });
   DB.repairs.filter((r) => r.customer?.name === name).forEach((r) => {
@@ -3186,6 +3779,7 @@ function Customers() {
   const [tab, setTab] = useState('timeline');
 
   const [editCust, setEditCust] = useState(null);
+  const [sheet, setSheet] = useState(null);
   const saveCustomer = async (v) => {
     const c = DB.customers.find((x) => x.id === editCust.id); if (!c) { setEditCust(null); return; }
     const newName = (v.name || '').trim();
@@ -3194,7 +3788,7 @@ function Customers() {
       alert(`Another customer named "${newName}" already exists.`); return;
     }
     if (newName !== c.name) cascadeCustomerRename(c.name, newName);
-    Object.assign(c, { name: newName, area: v.area, type: v.type, contact_name: v.contact_name, phone: v.phone, sites: num(v.sites) || 1, owner: O(v.owner || c.owner?.name || teamNames()[0]) });
+    Object.assign(c, { name: newName, area: v.area, type: v.type, contact_name: v.contact_name, phone: v.phone, gstin: cleanGstin(v.gstin), sites: num(v.sites) || 1, owner: O(v.owner || c.owner?.name || teamNames()[0]) });
     await commitChange();
     setEditCust(null); setRec(null); reload();
   };
@@ -3231,7 +3825,7 @@ function Customers() {
     const balance = DB.invoices.filter((i) => i.customer?.name === r.name).reduce((a, i) => a + (i.balance || 0), 0);
     setRec({
       title: r.name, subtitle: `${r.type} · ${r.area || ''}`, av: r.name,
-      body: <CustomerBody r={r} timeline={timeline} equip={equip} amcs={amcs} totalPaid={totalPaid} balance={balance} nav={nav} grantFreeAmc={grantFreeAmc}/>,
+      body: <CustomerBody r={r} timeline={timeline} equip={equip} amcs={amcs} totalPaid={totalPaid} balance={balance} nav={nav} grantFreeAmc={grantFreeAmc} onPrint={(title, html) => setSheet({ title, html })}/>,
       foot: <>
         <button className="btn-o" onClick={() => setEditCust(r)}><Ic n="sliders" s={14}/>Edit</button>
         <button className="btn-o" style={{ color: 'var(--red)' }} onClick={() => deleteCustomer(r)}>Delete</button>
@@ -3272,15 +3866,24 @@ function Customers() {
         initial={{ name: editCust.name, area: editCust.area, type: editCust.type, contact_name: editCust.contact_name, phone: editCust.phone, sites: editCust.sites, owner: editCust.owner?.name }}
         fields={ENTITIES.customer.fields}
         onClose={() => setEditCust(null)} onSave={saveCustomer}/>}
+          {sheet && <PrintSheet title={sheet.title} html={sheet.html} onClose={() => setSheet(null)}/>}
     </Shell>
   );
 }
-function CustomerBody({ r, timeline, equip, amcs, totalPaid, balance, nav, grantFreeAmc }) {
+function CustomerBody({ r, timeline, equip, amcs, totalPaid, balance, nav, grantFreeAmc, onPrint }) {
   const [tab, setTab] = useState('timeline');
+  const [period, setPeriod] = useState('all');
   const hasFreeAmc = amcs.some((a) => a.value === 0);
-  const TABS = [['timeline', 'Timeline'], ['equipment', `Equipment · ${equip.length}`], ['service', 'Service & AMC']];
+  const TABS = [['timeline', 'Timeline'], ['statement', 'Statement'], ['equipment', `Equipment · ${equip.length}`], ['service', 'Service & AMC']];
+  const st = tab === 'statement' ? customerStatement(r.name, period) : null;
   return (
     <>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+        <button className="btn-o" disabled={!SvBill || !onPrint}
+          onClick={() => onPrint && onPrint('Customer history · ' + r.name, SvBill.customerHistoryHtml(customerHistory(r.name), COMPANY))}>
+          <Ic n="printer" s={14}/>Print full history
+        </button>
+      </div>
       <DwSection label="Account"><DwBox rows={[
         ['Contact', r.contact_name || '—'], ['Phone', r.phone || '—'],
         ['Sites', r.sites], ['Lifetime value', inr(r.lifetime_value)],
@@ -3313,6 +3916,32 @@ function CustomerBody({ r, timeline, equip, amcs, totalPaid, balance, nav, grant
             ))}
           </div>
         )
+      )}
+
+      {tab === 'statement' && st && (
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+            <PeriodPicker value={period} onChange={setPeriod}/>
+            <button className="btn-o" disabled={!SvBill || !onPrint} onClick={() => onPrint && onPrint('Statement · ' + r.name + ' · ' + st.label, SvBill.statementHtml(st, COMPANY, r))}>
+              <Ic n="printer" s={14}/>Print statement
+            </button>
+          </div>
+          <div className="dwbox" style={{ marginBottom: 10 }}>
+            <div className="drow"><span className="k">Opening balance</span><span className="v">{inr(st.opening)}</span></div>
+            <div className="drow"><span className="k">Billed in period</span><span className="v">{inr(st.debit)}</span></div>
+            <div className="drow"><span className="k">Received in period</span><span className="v">{inr(st.credit)}</span></div>
+            <div className="drow"><span className="k" style={{ fontWeight: 800 }}>Closing balance</span><span className="v" style={{ fontWeight: 800, color: st.closing > 0 ? 'var(--red)' : undefined }}>{inr(st.closing)}</span></div>
+          </div>
+          {st.rows.length === 0 ? <div className="empty">No invoices or payments in {st.label}</div> : (
+            <div className="tscroll"><table className="tbl">
+              <thead><tr><th>Date</th><th>Particulars</th><th className="num">Billed</th><th className="num">Received</th><th className="num">Balance</th></tr></thead>
+              <tbody>{st.rows.map((e, i) => (
+                <tr key={i}><td>{date(e.on)}</td><td className="t1">{e.particulars}<div className="t2">{e.ref}</div></td>
+                  <td className="num">{e.debit ? inr(e.debit) : ''}</td><td className="num">{e.credit ? inr(e.credit) : ''}</td><td className="num">{inr(e.balance)}</td></tr>
+              ))}</tbody>
+            </table></div>
+          )}
+        </div>
       )}
 
       {tab === 'equipment' && (
@@ -3553,7 +4182,8 @@ function Amc() {
 
 function Equipment() {
   return (
-    <TablePage active="equipment" title="Customer Equipment Register" sub="Installed devices" endpoint="/equipment" entity="equipment"
+    <TablePage active="equipment" title="Customer Equipment Register" sub="Installed devices — find by serial, customer or location" endpoint="/equipment" entity="equipment"
+      rowSearch={(r) => [r.name, r.serial?.serial_no, r.customer?.name, r.location].join(' ')}
       columns={[
         { key: 'name', label: 'Device', t1: true },
         { key: 'customer', label: 'Customer', render: (r) => r.customer?.name },
@@ -3633,14 +4263,22 @@ function StockAdjust({ r, done }) {
 }
 function Inventory() {
   const [scan, setScan] = useState(false);
+  const [stockScanOpen, setStockScanOpen] = useState(false);
   const [refresh, setRefresh] = useState(0);
+  const serialsForProduct = (product) => (
+    (typeof productSerialRows === 'function' ? productSerialRows(product) : [])
+      .map((s) => s.serial_no).join(' ')
+  );
   return (
     <>
-    <TablePage active="inventory" title="Inventory" sub="Products & stock" endpoint="/products" entity="product"
+    <TablePage active="inventory" title="Inventory" sub="Products & stock — search by SKU, name, specs, category, or serial number" endpoint="/products" entity="product"
       refresh={refresh}
-      actions={<button className="btn-o" onClick={() => setScan(true)}><Ic n="barcode" s={14}/>Scan to add</button>}
+      actions={<>
+        <button className="btn-o" onClick={() => setStockScanOpen(true)}><Ic n="camera" s={14}/>Scan stock</button>
+        <button className="btn-o" onClick={() => setScan(true)}><Ic n="barcode" s={14}/>Scan to add</button>
+      </>}
       recFoot={(r, done) => <StockAdjust r={r} done={done}/>}
-      rowSearch={(r) => [r.sku, r.name, r.specs, r.category].join(' ')}
+      rowSearch={(r) => [r.sku, r.name, r.specs, r.category, serialsForProduct(r)].join(' ')}
       chips={[{ label: 'All' }, { label: 'In stock', value: 'in' }, { label: 'Low', value: 'low' }, { label: 'Out of stock', value: 'out' }]}
       columns={[
         { key: 'sku', label: 'SKU', render: (r) => <span className="sku">{r.sku}</span> },
@@ -3655,24 +4293,248 @@ function Inventory() {
       ]}
       rowToRecord={(r) => {
         const margin = r.sale_price ? Math.round((r.sale_price - r.purchase_price) / r.sale_price * 100) : 0;
+        const serialRows = typeof productSerialRows === 'function' ? productSerialRows(r) : [];
         return {
           title: r.name, subtitle: `${r.sku} · ${r.category || ''}`, icon: r.category === 'Cameras' ? 'camera' : 'box',
-          body: <DwSection label="Pricing & stock"><div className="dwbox">
-            <div className="li"><div className="lin">Purchase price</div><span className="lip">{inr(r.purchase_price)}</span></div>
-            <div className="li"><div className="lin">Sale price</div><span className="lip">{inr(r.sale_price)}</span></div>
-            <div className="li"><div className="lin" style={{ color: 'var(--a-ink)' }}>Margin</div><span className="lip" style={{ color: 'var(--a-ink)' }}>{margin}%</span></div>
-            <div className="li" style={{ background: 'var(--field)' }}><div className="lin">In stock / reserved</div><span className="lip">{r.stock} / {r.reserved}</span></div>
-            <div className="li"><div className="lin">Serial tracked</div><span className="lip">{r.track_serials ? 'Yes' : 'No'}</span></div>
-          </div></DwSection>,
+          body: <>
+            <DwSection label="Pricing & stock"><div className="dwbox">
+              <div className="li"><div className="lin">Purchase price</div><span className="lip">{inr(r.purchase_price)}</span></div>
+              <div className="li"><div className="lin">Sale price</div><span className="lip">{inr(r.sale_price)}</span></div>
+              <div className="li"><div className="lin" style={{ color: 'var(--a-ink)' }}>Margin</div><span className="lip" style={{ color: 'var(--a-ink)' }}>{margin}%</span></div>
+              <div className="li" style={{ background: 'var(--field)' }}><div className="lin">In stock / reserved</div><span className="lip">{r.stock} / {r.reserved}</span></div>
+              <div className="li"><div className="lin">Serial tracked</div><span className="lip">{r.track_serials ? 'Yes' : 'No'}</span></div>
+            </div></DwSection>
+            {serialRows.length > 0 && (
+              <DwSection label={`Serial numbers (${serialRows.length})`}>
+                <div className="dwbox">
+                  {serialRows.slice(0, 30).map((s) => (
+                    <div className="li" key={s.serial_no}>
+                      <div className="lin" style={{ fontFamily: 'monospace', fontWeight: 700 }}>{s.serial_no}</div>
+                      <span className="liq">{s.status.replace('_', ' ')}</span>
+                      {s.customer ? <span className="lip">{s.customer}</span> : null}
+                    </div>
+                  ))}
+                </div>
+                {serialRows.length > 30 && <div className="t2" style={{ marginTop: 6 }}>+{serialRows.length - 30} more — see Serial Tracking</div>}
+              </DwSection>
+            )}
+          </>,
         };
       }}
     />
     {scan && <ScanToAddSerial onClose={() => setScan(false)} onAdded={() => setRefresh((n) => n + 1)}/>}
+    {stockScanOpen && <ScanStock onClose={() => { setStockScanOpen(false); setRefresh((x) => x + 1); }} onChanged={() => setRefresh((x) => x + 1)}/>}
     </>
   );
 }
 
 const SER_TONE = { in_stock: 'gray', sold: 'blue', installed: 'green', rma: 'amber', returned: 'red' };
+/**
+ * Live camera scanner (phone, tablet, PC webcam) — app/scanner.js does the work.
+ * continuous: every new code calls onCode (return false for an error beep);
+ * otherwise it stops after the first code.
+ */
+function CameraScanner({ onCode, onClose, continuous = true, hint }) {
+  const video = useRef(null);
+  const ctl = useRef(null);
+  const onCodeRef = useRef(onCode);
+  onCodeRef.current = onCode;
+  const [err, setErr] = useState('');
+  const [ready, setReady] = useState(false);
+  const [torch, setTorch] = useState(false);
+  const [last, setLast] = useState('');
+  useEffect(() => {
+    let alive = true;
+    const S = typeof window !== 'undefined' && window.SvScan;
+    if (!S) { setErr('The scanner did not load. Reload the app and try again.'); return undefined; }
+    S.start(video.current, (code) => {
+      setLast(code);
+      let res = true;
+      try { res = onCodeRef.current ? onCodeRef.current(code) : true; } catch (e) { res = false; }
+      S.feedback(res !== false);
+      if (!continuous && ctl.current) ctl.current.stop();
+    }).then((c) => {
+      if (!alive) { c.stop(); return; }
+      ctl.current = c; setReady(true);
+    }).catch((e) => { if (alive) setErr(S.cameraErrorMessage(e)); });
+    return () => { alive = false; if (ctl.current) ctl.current.stop(); };
+  }, []);
+  return (
+    <div className="cam-scan">
+      <div className="cam-view">
+        <video ref={video} playsInline muted autoPlay/>
+        <div className="cam-aim"/>
+        {!ready && !err && <div className="cam-wait">Starting camera…</div>}
+      </div>
+      {err ? <div className="err" style={{ color: 'var(--red)', fontSize: 12, fontWeight: 700, marginTop: 8 }}>{err}</div>
+        : <div className="t2" style={{ marginTop: 6 }}>{hint || 'Point at the barcode or QR. Hold steady about 15 cm away.'}{last ? <> · Last: <b>{last}</b></> : null}</div>}
+      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        {ctl.current && ctl.current.hasTorch && (
+          <button type="button" className="btn-o" onClick={() => { const v = !torch; setTorch(v); ctl.current.torch(v); }}>{torch ? 'Light off' : 'Light on'}</button>
+        )}
+        {onClose && <button type="button" className="btn-o" style={{ marginLeft: 'auto' }} onClick={onClose}>Stop camera</button>}
+      </div>
+    </div>
+  );
+}
+/* One-shot scan for anything outside a form (e.g. the pairing QR). apk-bridge.js
+   calls window.SV_SCAN_ONCE() when there is no native scanner plugin. */
+let scanOnceOpen = null;
+if (typeof window !== 'undefined') {
+  window.SV_SCAN_ONCE = (title) => new Promise((resolve) => {
+    if (scanOnceOpen) scanOnceOpen({ title: title || 'Scan', resolve });
+    else resolve('');
+  });
+}
+function ScanOnceHost() {
+  const [req, setReq] = useState(null);
+  useEffect(() => { scanOnceOpen = setReq; return () => { scanOnceOpen = null; }; }, []);
+  if (!req) return null;
+  const done = (v) => { req.resolve(v || ''); setReq(null); };
+  return (
+    <div className="scrim show" style={{ zIndex: 80 }} onClick={() => done('')}>
+      <div onClick={(e) => e.stopPropagation()} className="cam-modal">
+        <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>{req.title}</div>
+        <CameraScanner continuous={false} onCode={(c) => { setTimeout(() => done(c), 150); return true; }} onClose={() => done('')}/>
+      </div>
+    </div>
+  );
+}
+function cameraAvailable() {
+  return typeof navigator !== 'undefined' && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+/* ---------------- Scan stock (9.8.0) ----------------
+   Scan a product's barcode (camera on the phone, USB scanner or webcam on the PC):
+   the matching item's stock goes up and is saved at once. An unknown code offers
+   to add the item with that barcode. */
+function findProductByCode(code) {
+  const c = String(code || '').trim();
+  if (!c) return null;
+  const lc = c.toLowerCase();
+  return DB.products.find((p) => p && !p.deleted_at && p.barcode && String(p.barcode) === c)
+    || DB.products.find((p) => p && !p.deleted_at && p.sku && String(p.sku).toLowerCase() === lc) || null;
+}
+/** Add `qty` of the product with this code to stock. → {ok, product, stock} or {ok:false, unknown:true, code}. */
+function stockScan(code, qty) {
+  const c = String(code || '').replace(/[\r\n\t]/g, '').trim();
+  if (!c) return { ok: false, error: 'Empty scan — try again.' };
+  const q = Math.max(1, Math.round(num(qty) || 1));
+  const p = findProductByCode(c);
+  if (!p) return { ok: false, unknown: true, code: c };
+  recordStockMove(p, q, 'scan-in', c);
+  touch(p);
+  return { ok: true, product: p, qty: q, stock: p.stock, code: c };
+}
+function ScanStock({ onClose, onChanged }) {
+  const [qty, setQty] = useState('1');
+  const [code, setCode] = useState('');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const [log, setLog] = useState([]);
+  const [camera, setCamera] = useState(isApkShell()); // the phone opens straight into the camera
+  const [unknown, setUnknown] = useState(null); // a code no item has yet → quick add
+  const [nw, setNw] = useState({ name: '', sale_price: '', stock: '1' });
+  const inp = useRef(null);
+  useEffect(() => { if (!camera && !unknown) setTimeout(() => inp.current && inp.current.focus(), 50); }, [camera, unknown, log.length]);
+  const apply = (raw) => {
+    setErr(''); setMsg('');
+    const r = stockScan(raw, qty);
+    if (r.unknown) {
+      setCamera(false);
+      setUnknown(r.code);
+      setNw({ name: '', sale_price: '', stock: String(Math.max(1, Math.round(num(qty) || 1))) });
+      return true;
+    }
+    if (!r.ok) { setErr(r.error); return false; }
+    setLog((x) => [{ code: r.code, name: r.product.name, qty: r.qty, stock: r.stock, uuid: r.product.uuid }, ...x].slice(0, 15));
+    setMsg('+' + r.qty + ' ' + r.product.name + ' · stock ' + r.stock);
+    commitChange().then((saved) => { if (!saved) setErr(SAVE_FAIL_MSG); });
+    onChanged && onChanged();
+    return true;
+  };
+  const submit = () => { if (code.trim()) { apply(code); setCode(''); } };
+  const undo = async () => {
+    const last = log[0];
+    if (!last) return;
+    const p = DB.products.find((x) => x.uuid === last.uuid);
+    if (p) { recordStockMove(p, -last.qty, 'scan-undo', last.code); touch(p); }
+    setLog((x) => x.slice(1));
+    setMsg('Undone: −' + last.qty + ' ' + last.name + (p ? ' · stock ' + p.stock : ''));
+    await commitChange();
+    onChanged && onChanged();
+  };
+  const addNew = async () => {
+    const name = String(nw.name || '').trim();
+    if (!name) { setErr('Enter a name for the new item.'); return; }
+    if (ENTITIES.product.create({ name, sale_price: nw.sale_price, stock: nw.stock, barcode: unknown, sku: '' }) === false) return;
+    const p = DB.products[DB.products.length - 1];
+    setLog((x) => [{ code: unknown, name: p.name, qty: num(p.stock), stock: p.stock, uuid: p.uuid, created: true }, ...x].slice(0, 15));
+    setMsg('Added new item ' + p.name + ' · stock ' + p.stock);
+    setUnknown(null);
+    const saved = await commitChange();
+    if (!saved) setErr(SAVE_FAIL_MSG);
+    onChanged && onChanged();
+    if (isApkShell()) setCamera(true);
+  };
+  return (
+    <div className="scrim show" style={{ zIndex: 60 }} onClick={onClose}>
+      <div className="scan-stock" onClick={(e) => e.stopPropagation()} style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 460, maxWidth: '94vw', maxHeight: '92vh', overflowY: 'auto', background: 'var(--card)', border: '1px solid var(--ln)', borderRadius: 16, padding: '20px 20px 16px', boxShadow: '0 20px 60px rgba(40,35,20,.22)', zIndex: 61 }}>
+        <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>Scan stock</div>
+        <div style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 600, marginBottom: 10, lineHeight: 1.45 }}>
+          Scan an item's barcode: its stock goes up and is saved at once. A new code lets you add the item.
+        </div>
+        {unknown ? (
+          <div className="dwbox" style={{ padding: 12 }}>
+            <div style={{ fontWeight: 800, fontSize: 13 }}>New barcode {unknown}</div>
+            <div style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 600, margin: '2px 0 6px' }}>No item has this code yet. Add it:</div>
+            <label className="field-l">Item name</label>
+            <input className="inp" autoFocus value={nw.name} onChange={(e) => setNw({ ...nw, name: e.target.value })}/>
+            <label className="field-l">Sale price (₹)</label>
+            <input className="inp" type="number" min={0} value={nw.sale_price} onChange={(e) => setNw({ ...nw, sale_price: e.target.value })}/>
+            <label className="field-l">Stock</label>
+            <input className="inp" type="number" min={0} value={nw.stock} onChange={(e) => setNw({ ...nw, stock: e.target.value })}/>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button className="btn-o" style={{ flex: 1, justifyContent: 'center' }} onClick={() => { setUnknown(null); if (isApkShell()) setCamera(true); }}>Skip</button>
+              <button className="btn-p" style={{ flex: 1, justifyContent: 'center' }} onClick={addNew}>Add item</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+              <div style={{ width: 90 }}>
+                <label className="field-l">Qty per scan</label>
+                <input className="inp" type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)}/>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label className="field-l">Barcode / SKU</label>
+                <input ref={inp} className="inp" value={code} autoComplete="off" placeholder="Scan or type, then Enter"
+                  onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}/>
+              </div>
+            </div>
+            {camera
+              ? <CameraScanner onCode={apply} onClose={() => setCamera(false)} hint="Point at the next item's barcode. Each one is saved as you scan."/>
+              : (cameraAvailable() || isApkShell()) && (
+                <button className="btn-o" style={{ marginTop: 10, justifyContent: 'center', width: '100%' }} onClick={() => { setErr(''); setCamera(true); }}>
+                  <Ic n="camera" s={14}/>Use camera
+                </button>
+              )}
+          </>
+        )}
+        {err && <div className="err" style={{ color: 'var(--red)', fontSize: 12, fontWeight: 700, marginTop: 10 }}>{err}</div>}
+        {msg && <div className="scan-msg" style={{ color: 'var(--green)', fontSize: 12, fontWeight: 700, marginTop: 10 }}>{msg}</div>}
+        {log.length > 0 && (
+          <div className="dwbox scan-log" style={{ marginTop: 12 }}>
+            {log.map((x, i) => <div className="drow" key={i}><span className="k">{x.created ? 'New · ' : '+' + x.qty + ' · '}{x.name}</span><span className="v">stock {x.stock}</span></div>)}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 9, marginTop: 14 }}>
+          <button className="btn-o" style={{ flex: 1, justifyContent: 'center' }} disabled={!log.length || !!(log[0] && log[0].created)} onClick={undo}>Undo last</button>
+          <button className="btn-p" style={{ flex: 1, justifyContent: 'center' }} onClick={onClose}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 function ScanToAddSerial({ onClose, onAdded }) {
   const names = prodNames();
   const [product, setProduct] = useState(names[0] || '');
@@ -3681,7 +4543,19 @@ function ScanToAddSerial({ onClose, onAdded }) {
   const [err, setErr] = useState('');
   const [log, setLog] = useState([]);
   const inp = useRef(null);
-  useEffect(() => { setTimeout(() => inp.current && inp.current.focus(), 50); }, [log.length]);
+  const [camera, setCamera] = useState(false);
+  useEffect(() => { if (!camera) setTimeout(() => inp.current && inp.current.focus(), 50); }, [log.length, camera]);
+  /** A serial read by the camera: added at once; false → error beep (duplicate, no product…). */
+  const onCameraCode = (sn) => {
+    const r = addScannedSerial(sn, product);
+    if (!r.ok) { setMsg(''); setErr(r.error); return false; }
+    setErr('');
+    setLog((x) => [{ sn: r.serial.serial_no, stock: r.product ? r.product.stock : '—' }, ...x].slice(0, 12));
+    setMsg('Added ' + r.serial.serial_no + (r.product ? ' · stock ' + r.product.stock : ''));
+    commitChange().then((saved) => { if (!saved) setErr(SAVE_FAIL_MSG); });
+    onAdded && onAdded(r);
+    return true;
+  };
   const submit = async (raw) => {
     setErr(''); setMsg('');
     const r = addScannedSerial(raw != null ? raw : code, product);
@@ -3711,21 +4585,14 @@ function ScanToAddSerial({ onClose, onAdded }) {
           placeholder="Waiting for scanner…"
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(e.target.value); } }}/>
-        {isApkShell() && (
-          <button className="btn-o" style={{ marginTop: 10, justifyContent: 'center', width: '100%' }}
-            onClick={async () => {
-              try {
-                if (window.SV_APK && window.SV_APK.scanBarcode) {
-                  const sn = await window.SV_APK.scanBarcode();
-                  if (sn) submit(sn);
-                } else {
-                  alert('Camera scan is available in the Android app.');
-                }
-              } catch (e) { setErr(e.message || 'Camera scan failed'); }
-            }}>
-            <Ic n="camera" s={14}/>Use camera
-          </button>
-        )}
+        {camera
+          ? <CameraScanner onCode={onCameraCode} onClose={() => setCamera(false)} hint="Each new serial is added as you scan. Point at the next label."/>
+          : (cameraAvailable() || isApkShell()) && (
+            <button className="btn-o" style={{ marginTop: 10, justifyContent: 'center', width: '100%' }}
+              onClick={() => { if (!product) { setErr('Select a product first, then scan.'); return; } setErr(''); setCamera(true); }}>
+              <Ic n="camera" s={14}/>Use camera
+            </button>
+          )}
         {err && <div className="err" style={{ color: 'var(--red)', fontSize: 12, fontWeight: 700, marginTop: 10 }}>{err}</div>}
         {msg && <div style={{ color: 'var(--green)', fontSize: 12, fontWeight: 700, marginTop: 10 }}>{msg}</div>}
         {log.length > 0 && (
@@ -3745,11 +4612,22 @@ function ScanToAddSerial({ onClose, onAdded }) {
 function Serials() {
   const [scan, setScan] = useState(false);
   const [refresh, setRefresh] = useState(0);
+  const openProduct = (product) => {
+    if (product && product.id != null) window.location.hash = '/inventory?open=' + product.id;
+  };
   return (
     <>
-    <TablePage active="serials" title="Serial Tracking" sub="Per-unit serial register" endpoint="/serials" entity="serial"
+    <TablePage active="serials" title="Serial Tracking" sub="Per-unit serial register — find by serial number, product or customer" endpoint="/serials" entity="serial"
       refresh={refresh}
       actions={<button className="btn-o" onClick={() => setScan(true)}><Ic n="barcode" s={14}/>Scan to add</button>}
+      recFoot={(r, done) => {
+        const name = r.product?.name || r.product;
+        const p = findProductByRef(r.product) || (name ? findProductByRef(name) : null);
+        return p
+          ? <button className="btn-o" onClick={() => { done(); openProduct(p); }}><Ic n="box" s={14}/>Open product</button>
+          : null;
+      }}
+      rowSearch={(r) => [r.serial_no, r.product?.name, r.customer?.name, r.status].join(' ')}
       chips={[{ label: 'All' }]}
       columns={[
         { key: 'serial_no', label: 'Serial', t1: true },
@@ -3758,14 +4636,20 @@ function Serials() {
         { key: 'warranty', label: 'Warranty', render: (r) => r.in_warranty ? <Pill t="green" dot>In warranty</Pill> : <Pill t="gray">—</Pill> },
         { key: 'status', label: 'Status', render: (r) => <Pill t={SER_TONE[r.status]} dot>{r.status.replace('_', ' ')}</Pill> },
       ]}
-      rowToRecord={(r) => ({
-        title: r.serial_no, subtitle: r.product?.name, icon: 'box',
-        body: <DwSection label="Serial"><DwBox rows={[
-          ['Status', <Pill t={SER_TONE[r.status]} dot>{r.status.replace('_', ' ')}</Pill>],
-          ['Customer', r.customer?.name || '—'], ['Sold on', date(r.sold_on)],
-          ['Warranty end', date(r.warranty_end)],
-        ]}/></DwSection>,
-      })}
+      rowToRecord={(r) => {
+        const name = r.product?.name || r.product;
+        const p = findProductByRef(r.product) || (name ? findProductByRef(name) : null);
+        return {
+          title: r.serial_no, subtitle: r.product?.name, icon: 'box',
+          body: <DwSection label="Serial"><DwBox rows={[
+            ['Status', <Pill t={SER_TONE[r.status]} dot>{r.status.replace('_', ' ')}</Pill>],
+            ['Product', r.product?.name || '—'],
+            ['Customer', r.customer?.name || '—'], ['Sold on', date(r.sold_on)],
+            ['Warranty end', date(r.warranty_end)],
+            p ? ['Product SKU', p.sku || '—'] : ['Product SKU', '—'],
+          ]}/></DwSection>,
+        };
+      }}
     />
     {scan && <ScanToAddSerial onClose={() => setScan(false)} onAdded={() => setRefresh((n) => n + 1)}/>}
     </>
@@ -4044,60 +4928,344 @@ function CompanyEditor() {
   );
 }
 
+function parseLanUrl(url) {
+  try {
+    const m = String(url || '').match(/^https?:\/\/([^/:]+):(\d+)/i);
+    if (m) return { ip: m[1], port: m[2] };
+    const m2 = String(url || '').match(/^https?:\/\/([^/]+)/i);
+    if (m2) {
+      const host = m2[1];
+      const colon = host.lastIndexOf(':');
+      if (colon > 0) return { ip: host.slice(0, colon), port: host.slice(colon + 1) };
+      return { ip: host, port: '80' };
+    }
+  } catch (e) { /* ignore */ }
+  return { ip: '', port: '' };
+}
+function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(String(text || '')).then(() => true).catch(() => false);
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = String(text || '');
+    ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return Promise.resolve(!!ok);
+  } catch (e) { return Promise.resolve(false); }
+}
+function ConnCard({ label, value, mono, onCopy, copyLabel }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div style={{ background: '#fff', border: '1px solid var(--ln)', borderRadius: 14, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--mut)' }}>{label}</div>
+        <div style={{ fontSize: mono ? 22 : 15, fontWeight: 800, color: 'var(--ink)', fontFamily: mono ? 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' : 'inherit', letterSpacing: mono ? '.06em' : 'normal', wordBreak: 'break-all', marginTop: 2 }}>{value || '—'}</div>
+      </div>
+      {onCopy && value && (
+        <button className="btn-o" style={{ padding: '8px 12px', fontSize: 12, fontWeight: 800, flexShrink: 0 }} onClick={async () => {
+          const ok = await copyText(value);
+          if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1400); }
+          if (onCopy) onCopy(ok);
+        }}>{copyLabel || (copied ? 'Copied ✓' : 'Copy')}</button>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- shop PC target (IP + port + PIN) helpers ---------------- */
+const SV_SHOP_IP_KEY = 'sv_shop_ip';
+const SV_SHOP_PORT_KEY = 'sv_shop_port';
+const SV_AUTOSYNC_KEY = 'sv_autosync';
+function shopBaseFromParts(ip, port) {
+  let host = String(ip == null ? '' : ip).trim().replace(/\s+/g, '');
+  if (!host) return '';
+  const p = String(port == null ? '' : port).trim().replace(/[^0-9]/g, '');
+  if (/^https?:\/\//i.test(host)) {
+    host = host.replace(/\/+$/, '');
+    if (p && !/:[0-9]+$/.test(host)) host += ':' + p;
+    return host;
+  }
+  host = host.replace(/^\/+|\/+$/g, '');
+  if (p && !/:[0-9]+$/.test(host)) return 'http://' + host + ':' + p;
+  return 'http://' + host;
+}
+function rememberShopTarget(ip, port) {
+  try {
+    localStorage.setItem(SV_SHOP_IP_KEY, String(ip == null ? '' : ip));
+    localStorage.setItem(SV_SHOP_PORT_KEY, String(port == null ? '' : port));
+  } catch (e) { /* ignore */ }
+}
+function readShopTarget() {
+  let ip = ''; let port = '';
+  try {
+    ip = localStorage.getItem(SV_SHOP_IP_KEY) || '';
+    port = localStorage.getItem(SV_SHOP_PORT_KEY) || '';
+  } catch (e) { /* ignore */ }
+  return { ip, port, base: shopBaseFromParts(ip, port) };
+}
+function autoSyncEnabled() {
+  try { return localStorage.getItem(SV_AUTOSYNC_KEY) !== 'off'; } catch (e) { return true; }
+}
+function setAutoSyncEnabled(on) {
+  try { localStorage.setItem(SV_AUTOSYNC_KEY, on ? 'on' : 'off'); } catch (e) { /* ignore */ }
+}
+/** Ping the shop PC. Resolves with { ok, enabled, error }. */
+async function testShopReachable(base) {
+  const url = String(base || '').replace(/\/+$/, '');
+  if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'Enter the shop PC IP and port first.' };
+  try {
+    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = setTimeout(() => { try { ctl && ctl.abort(); } catch (e) { /* ignore */ } }, 6000);
+    const res = await lanFetch(url + '/api/status', { cache: 'no-store', signal: ctl ? ctl.signal : undefined });
+    clearTimeout(timer);
+    if (!res || !res.ok) return { ok: false, error: 'Shop PC answered but the service is not ready (HTTP ' + ((res && res.status) || '?') + ').' };
+    const st = await res.json().catch(() => ({}));
+    return { ok: true, enabled: !!(st && st.enabled) };
+  } catch (e) {
+    return { ok: false, error: 'Cannot reach ' + url + '. Check both devices are on the same Wi-Fi and Wi-Fi CSV is on.' };
+  }
+}
+/** Auth headers for CSV endpoints: PIN for browsers, bearer token for paired devices. */
+function csvAuthHeaders(pin) {
+  const headers = {};
+  const p = String(pin == null ? '' : pin).trim();
+  if (p) { headers['X-SV-PIN'] = p; headers['X-SV-Pin'] = p; }
+  const token = getPairing() && getPairing().token;
+  if (token) headers.Authorization = 'Bearer ' + token;
+  return headers;
+}
+function csvDownloadUrl(base, pin) {
+  const u = String(base || '').replace(/\/+$/, '') + '/backup/export';
+  const p = String(pin == null ? '' : pin).trim();
+  return p ? u + '?pin=' + encodeURIComponent(p) : u;
+}
+/** Pull the shop PC's full CSV backup. Throws on failure. */
+async function fetchCsvFromShop(base, pin) {
+  const url = String(base || '').replace(/\/+$/, '');
+  if (!url) throw new Error('Enter the shop PC IP and port first.');
+  const res = await lanFetch(url + '/backup/export' + (String(pin || '').trim() ? '?pin=' + encodeURIComponent(String(pin).trim()) : ''), {
+    cache: 'no-store', headers: csvAuthHeaders(pin),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.error || ('Download failed (HTTP ' + res.status + ').'));
+  }
+  return res.text();
+}
+/** Push a CSV backup to the shop PC (replaces shop data). Throws on failure. */
+async function sendCsvToShop(base, pin, csvText) {
+  const url = String(base || '').replace(/\/+$/, '');
+  if (!url) throw new Error('Enter the shop PC IP and port first.');
+  const headers = Object.assign({ 'Content-Type': 'text/csv; charset=utf-8' }, csvAuthHeaders(pin));
+  const res = await lanFetch(url + '/backup/import' + (String(pin || '').trim() ? '?pin=' + encodeURIComponent(String(pin).trim()) : ''), {
+    method: 'POST', headers, body: String(csvText || ''),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('Upload failed (HTTP ' + res.status + ').'));
+  return data;
+}
+
+/**
+ * Keeps a paired phone / tablet in step with the shop PC while on Wi-Fi.
+ * Runs on app focus / tab visibility and every few minutes; fully silent.
+ */
+function ShopAutoSync() {
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    // Listeners are always attached: pairing can happen mid-session, and the
+    // old early-return meant auto-sync stayed dead until the app was restarted.
+    let running = false;
+    const run = async () => {
+      if (running || !getPairing() || !autoSyncEnabled()) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      running = true;
+      try { await syncWithShop(); } catch (e) { /* offline — retry on next tick */ }
+      finally { running = false; }
+    };
+    const onVis = () => { if (typeof document !== 'undefined' && !document.hidden) run(); };
+    const iv = setInterval(run, 2 * 60 * 1000);
+    window.addEventListener('focus', run);
+    window.addEventListener('online', run);
+    document.addEventListener('visibilitychange', onVis);
+    run();
+    return () => {
+      clearInterval(iv);
+      window.removeEventListener('focus', run);
+      window.removeEventListener('online', run);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, []);
+  return null;
+}
+
 function WifiCsvPanel({ busy, setBusy, setMsg, msg }) {
   const hasLan = typeof window !== 'undefined' && window.electronAPI && typeof window.electronAPI.lanStatus === 'function';
   const [lan, setLan] = useState({ enabled: false, pin: '', urls: [] });
+  const initialTarget = readShopTarget();
+  const [ip, setIp] = useState(initialTarget.ip);
+  const [port, setPort] = useState(initialTarget.port);
+  const [pin, setPin] = useState('');
+  const [conn, setConn] = useState('');
+  const [downloadedCsv, setDownloadedCsv] = useState('');
+  const fileRef = useRef(null);
   const refreshLan = async () => {
     if (!hasLan) return;
     try { const st = await window.electronAPI.lanStatus(); if (st) setLan(st); } catch (e) { /* ignore */ }
   };
   useEffect(() => { refreshLan(); }, []);
   const csvLinks = (lan.urls || []).map((u) => u.replace(/\/+$/, '') + '/wifi-csv.html');
+  const firstUrl = (lan.urls || [])[0] || '';
+  const parsed = parseLanUrl(firstUrl);
+
+  // ---- Phone / tablet role: pull + push CSV straight over Wi-Fi ----
   if (!hasLan) {
+    const base = shopBaseFromParts(ip, port);
+    const saveTarget = () => rememberShopTarget(ip, port);
+    const doTest = async () => {
+      saveTarget();
+      setBusy(true); setConn('');
+      try {
+        const r = await testShopReachable(base);
+        if (r.ok) setConn(r.enabled ? 'Connected to shop PC — Wi-Fi CSV is on.' : 'Shop PC reached, but Wi-Fi CSV is OFF. Turn it on in the PC Settings.');
+        else setConn(r.error || 'Not reachable.');
+      } finally { setBusy(false); }
+    };
+    const doDownload = async () => {
+      saveTarget();
+      setBusy(true); setConn('');
+      try {
+        const text = await fetchCsvFromShop(base, pin);
+        const rows = countCsvRecords(text);
+        setDownloadedCsv(text);
+        const filename = 'cctv-erp-backup-' + new Date().toISOString().slice(0, 10) + '.csv';
+        const savedPath = await downloadBackupCsv(text, filename);
+        setConn('Downloaded ' + rows + ' records from the shop PC' + (savedPath ? ' → ' + savedPath : '.') + ' You can also apply it to this device below.');
+      } catch (e) { setConn(e.message || 'Download failed.'); }
+      finally { setBusy(false); }
+    };
+    const applyDownloaded = async () => {
+      if (!downloadedCsv) return;
+      if (!confirm('⚠️ This REPLACES the data on THIS device with the CSV from the shop PC. Continue?')) return;
+      setBusy(true); setConn('');
+      try {
+        const restored = await importBackupCsv(downloadedCsv);
+        const total = Object.values(restored || {}).reduce((a, b) => a + b, 0);
+        setConn('✓ Applied ' + total + ' records to this device. Reloading…');
+        setTimeout(() => window.location.reload(), 700);
+      } catch (e) { setConn(e.message || 'Could not apply the CSV.'); }
+      finally { setBusy(false); }
+    };
+    const doSend = async (file) => {
+      if (!file) return;
+      if (!confirm('⚠️ This REPLACES ALL DATA on the shop PC with this CSV file. Continue?')) return;
+      saveTarget();
+      setBusy(true); setConn('');
+      try {
+        const text = await file.text();
+        const r = await sendCsvToShop(base, pin, text);
+        const total = Object.values(r.restored || {}).reduce((a, b) => a + b, 0);
+        setConn('✓ Sent to shop PC — restored ' + (total || 'records') + '. Open Smart Vision ERP on the PC to confirm.');
+      } catch (e) { setConn(e.message || 'Upload failed.'); }
+      finally { setBusy(false); if (fileRef.current) fileRef.current.value = ''; }
+    };
     return (
       <div className="panel">
         <div className="pah"><h3>Phone &amp; Samsung tablet — CSV on Wi-Fi</h3><span className="sub">· same network</span></div>
-        <div style={{ padding: 16, fontSize: 12.5, fontWeight: 700, color: 'var(--ink2)' }}>
-          This control is in the Windows desktop app. Open Settings there to share CSV with a phone or tablet.
+        <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ fontSize: 12.5, color: 'var(--ink2)', fontWeight: 600, lineHeight: 1.5 }}>
+            On the <b>shop PC</b>, open Settings → <b>Turn on Wi-Fi CSV</b>, then type its <b>IP, port and PIN</b> here.
+            <b> Download CSV</b> pulls a full backup from the PC onto this device; <b>Send CSV to shop PC</b> restores a file back (replaces shop data).
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: 150 }}>
+              <label className="field-l">Shop PC IP address</label>
+              <input className="inp" value={ip} onChange={(e) => setIp(e.target.value)} placeholder="192.168.1.10" inputMode="decimal" autoComplete="off"/>
+            </div>
+            <div style={{ flex: 1, minWidth: 110 }}>
+              <label className="field-l">Port</label>
+              <input className="inp" value={port} onChange={(e) => setPort(e.target.value)} placeholder="e.g. 51732" inputMode="numeric" autoComplete="off"/>
+            </div>
+          </div>
+          <div>
+            <label className="field-l">PIN (from the shop PC Settings)</label>
+            <input className="inp" value={pin} onChange={(e) => setPin(e.target.value)} placeholder="6-digit PIN (not needed once paired)" inputMode="numeric" maxLength={6} autoComplete="one-time-code"/>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 700 }}>Address: {base || '—'}</div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button className="btn-o" disabled={busy} onClick={doTest}><Ic n="check" s={14}/>Test connection</button>
+            <button className="btn-p" disabled={busy} onClick={doDownload}><Ic n="download" s={14}/>Download CSV from shop PC</button>
+            <button className="btn-o" disabled={busy} onClick={() => { saveTarget(); if (!pin.trim() && !getPairing()) { setConn('Enter the PIN from the shop PC first.'); return; } fileRef.current?.click(); }}><Ic n="upload" s={14}/>Send CSV to shop PC</button>
+            <input ref={fileRef} type="file" accept=".csv,text/csv" hidden onChange={(e) => doSend(e.target.files?.[0])}/>
+            {downloadedCsv && (
+              <button className="btn-o" disabled={busy} onClick={applyDownloaded}><Ic n="check" s={14}/>Apply downloaded CSV to this device</button>
+            )}
+          </div>
+          {conn && <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--a-ink)' }}>{conn}</div>}
+          {msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--a-ink)' }}>{msg}</div>}
         </div>
       </div>
     );
   }
+
+  // ---- Shop PC role: host the CSV service for phones / tablets ----
   return (
     <div className="panel">
       <div className="pah"><h3>Phone &amp; Samsung tablet — CSV on Wi-Fi</h3><span className="sub">· same Wi-Fi as this PC</span></div>
       <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontSize: 12.5, color: 'var(--ink2)', fontWeight: 600, lineHeight: 1.5 }}>
-          Keep this ERP open. Put the phone or Samsung tablet on the <b>same Wi-Fi</b>, then open the link below in Chrome.
-          Enter the PIN. <b>Download CSV</b> pulls a full backup onto the device. <b>Send CSV to shop PC</b> restores that file here (replaces live data).
+          Keep this ERP open. Put the phone or Samsung tablet on the <b>same Wi-Fi</b>.
+          On the device, open Chrome and type the <b>IP, port, and PIN</b> below.
+          <b> Download CSV</b> pulls a full backup onto the device. <b>Send CSV to shop PC</b> restores that file here (replaces live data).
         </div>
-        <div style={{ fontSize: 12.5, fontWeight: 700 }}>
-          {lan.enabled
-            ? <>Wi-Fi CSV is on · PIN <span style={{ color: 'var(--a-ink)', fontSize: 18 }}>{lan.pin}</span></>
-            : 'Wi-Fi CSV is off.'}
-        </div>
-        {csvLinks.length > 0 && csvLinks.map((link) => (
-          <div key={link} style={{ fontSize: 13, fontWeight: 700, wordBreak: 'break-all', background: 'var(--field)', padding: 12, borderRadius: 10 }}>
-            Open on tablet / phone:{' '}
-            <a href={link} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--a-ink)' }}>{link}</a>
+        {!lan.enabled && (
+          <div style={{ background: 'var(--field)', borderRadius: 12, padding: 12, fontSize: 12.5, fontWeight: 700, color: 'var(--ink2)' }}>
+            Wi-Fi CSV is currently off. Click <b>Turn on Wi-Fi CSV</b> below to share data with phones / tablets on this network.
           </div>
-        ))}
+        )}
+        {lan.enabled && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <ConnCard label="PIN (enter on phone / tablet)" value={lan.pin} mono copyLabel="Copy PIN" onCopy={(ok) => { if (ok) setMsg('PIN copied to clipboard.'); }}/>
+            {parsed.ip && <ConnCard label="IP address" value={parsed.ip} mono copyLabel="Copy IP" onCopy={(ok) => { if (ok) setMsg('IP address copied.'); }}/>}
+            {parsed.port && <ConnCard label="Port number" value={parsed.port} mono copyLabel="Copy port" onCopy={(ok) => { if (ok) setMsg('Port number copied.'); }}/>}
+            {csvLinks.length > 0 && csvLinks.map((link) => (
+              <ConnCard key={link} label="CSV sync page (open on device)" value={link} copyLabel="Copy URL" onCopy={(ok) => { if (ok) setMsg('Link copied — open in Chrome on device.'); }}/>
+            ))}
+            {firstUrl && (
+              <ConnCard label="Full ERP (open on tablet for live shared data)" value={firstUrl.replace(/\/+$/, '') + '/erp.html'} copyLabel="Copy URL" onCopy={(ok) => { if (ok) setMsg('ERP link copied — sign in on the tablet to work on the same live data.'); }}/>
+            )}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button className="btn-p" disabled={busy} onClick={async () => {
             setBusy(true); setMsg('');
             try {
               await window.electronAPI.lanEnable(!lan.enabled);
               await refreshLan();
-              setMsg(lan.enabled ? 'Wi-Fi CSV turned off.' : 'Wi-Fi CSV on — open the link on the phone or Samsung tablet.');
+              setMsg(lan.enabled ? 'Wi-Fi CSV turned off.' : 'Wi-Fi CSV on — type IP, port & PIN on the phone or Samsung tablet.');
             } catch (e) { setMsg(e.message || 'Could not toggle Wi-Fi CSV'); }
             finally { setBusy(false); }
           }}>{lan.enabled ? 'Turn off Wi-Fi CSV' : 'Turn on Wi-Fi CSV'}</button>
           <button className="btn-o" disabled={busy || !lan.enabled} onClick={async () => {
             setBusy(true);
-            try { await window.electronAPI.lanRotatePin(); await refreshLan(); setMsg('New PIN generated.'); }
+            try { await window.electronAPI.lanRotatePin(); await refreshLan(); setMsg('New PIN generated — give this to the phone / tablet user.'); }
             catch (e) { setMsg(e.message || 'Could not rotate PIN'); }
             finally { setBusy(false); }
           }}>New PIN</button>
+          {window.electronAPI && window.electronAPI.lanAllowFirewall ? (
+            <button className="btn-o" disabled={busy} onClick={async () => {
+              setBusy(true);
+              try {
+                const r = await window.electronAPI.lanAllowFirewall();
+                setMsg(r && r.ok ? 'Windows Firewall now allows Smart Vision ERP on this network.' : (r && r.error) || 'Could not update the firewall.');
+              } finally { setBusy(false); }
+            }}>Allow through Windows Firewall</button>
+          ) : null}
         </div>
         {msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--a-ink)' }}>{msg}</div>}
       </div>
@@ -4108,8 +5276,15 @@ function WifiCsvPanel({ busy, setBusy, setMsg, msg }) {
 function MobileSyncPanel({ busy, setBusy, setMsg, msg }) {
   const hasLan = typeof window !== 'undefined' && window.electronAPI && typeof window.electronAPI.lanStatus === 'function';
   const [lan, setLan] = useState({ enabled: false, pin: '', urls: [], devices: [] });
-  const [pairUrl, setPairUrl] = useState('');
+  const initialTarget = readShopTarget();
+  const pair0 = getPairing();
+  const initialUrl = pair0 && pair0.url ? pair0.url : '';
+  const initialParts = parseLanUrl(initialUrl);
+  const [ip, setIp] = useState(initialTarget.ip || initialParts.ip || '');
+  const [port, setPort] = useState(initialTarget.port || initialParts.port || '');
   const [pairPin, setPairPin] = useState('');
+  const [conn, setConn] = useState('');
+  const [autoSync, setAutoSync] = useState(autoSyncEnabled());
   const pair = getPairing();
   let lastSync = '';
   try { lastSync = localStorage.getItem('sv_last_sync') || ''; } catch (e) { lastSync = ''; }
@@ -4118,26 +5293,79 @@ function MobileSyncPanel({ busy, setBusy, setMsg, msg }) {
     try { const st = await window.electronAPI.lanStatus(); if (st) setLan(st); } catch (e) { /* ignore */ }
   };
   useEffect(() => { refreshLan(); }, []);
+  const firstUrl = (lan.urls || [])[0] || '';
+  const parsed = parseLanUrl(firstUrl);
   const qrText = lan.enabled && lan.urls && lan.urls[0]
     ? JSON.stringify({ url: lan.urls[0], pairingPin: lan.pin, revision: currentRevision })
     : '';
+  const base = shopBaseFromParts(ip, port);
+  const doTest = async () => {
+    rememberShopTarget(ip, port);
+    setBusy(true); setConn('');
+    try {
+      const r = await testShopReachable(base);
+      setConn(r.ok
+        ? (r.enabled ? 'Connected to shop PC — ready to pair / sync.' : 'Shop PC reached, but LAN pairing is OFF. Enable it in the PC Settings.')
+        : (r.error || 'Not reachable.'));
+    } finally { setBusy(false); }
+  };
+  const doPair = async () => {
+    rememberShopTarget(ip, port);
+    setBusy(true); setMsg(''); setConn('');
+    try {
+      if (!base) { setConn('Enter the shop PC IP address and port.'); return; }
+      if (!pairPin) { setConn('Enter the 6-digit PIN from the shop PC Settings.'); return; }
+      const data = await pairWithShop({ url: base, pin: pairPin });
+      rememberShopTarget(ip, port);
+      setMsg('Paired (device ' + (data.prefix || '') + '). Pull complete — you can work offline.');
+    } catch (e) { setMsg(e.message || 'Pair failed'); }
+    finally { setBusy(false); }
+  };
+  const doScanPair = async () => {
+    if (!(window.SV_APK && window.SV_APK.scanPairingQr)) return;
+    setBusy(true); setMsg(''); setConn('');
+    try {
+      const scanned = await window.SV_APK.scanPairingQr();
+      if (!scanned || !scanned.url) { setConn('No pairing QR detected.'); return; }
+      const parts = parseLanUrl(scanned.url);
+      if (parts.ip) setIp(parts.ip);
+      if (parts.port) setPort(parts.port);
+      const data = await pairWithShop({ url: scanned.url, pin: scanned.pairingPin || pairPin });
+      rememberShopTarget(parts.ip || ip, parts.port || port);
+      setMsg('Paired from QR (device ' + (data.prefix || '') + ').');
+    } catch (e) { setMsg(e.message || 'QR pairing failed'); }
+    finally { setBusy(false); }
+  };
+  const doSync = async () => {
+    setBusy(true); setMsg(''); setConn('');
+    try { await syncWithShop(); setMsg('Synced with shop PC at ' + new Date().toLocaleTimeString() + '.'); }
+    catch (e) { setMsg(e.message || 'Sync failed'); }
+    finally { setBusy(false); }
+  };
   return (
     <div className="panel">
-      <div className="pah"><h3>Mobile / Android sync</h3><span className="sub">· offline phone · merge on shop Wi-Fi</span></div>
+      <div className="pah"><h3>Mobile / Android sync (APK)</h3><span className="sub">· offline phone · merge on shop Wi-Fi</span></div>
       <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontSize: 12.5, color: 'var(--ink2)', fontWeight: 600, lineHeight: 1.5 }}>
-          Technicians work offline on the APK. When they return to the shop, pair once (PIN) then Sync.
-          The shop PC stays the source of truth. LAN pairing is off until you enable it.
+          Technicians work offline on the APK. When they return to the shop, type the <b>IP, port, and PIN</b> shown on the shop PC, then Pair once.
+          After that, <b>Sync now</b> (or auto-sync while on the shop Wi-Fi) merges both ways. The shop PC stays the source of truth.
         </div>
         {hasLan && (
           <>
-            <div style={{ fontSize: 12.5, fontWeight: 700 }}>
-              {lan.enabled ? <>LAN pairing on · PIN <span style={{ color: 'var(--a-ink)' }}>{lan.pin}</span></> : 'LAN pairing is off.'}
-            </div>
-            {lan.urls && lan.urls.length > 0 && <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--mut)' }}>{lan.urls.join(' · ')}</div>}
-            {qrText && (
-              <div style={{ fontSize: 11, fontWeight: 600, wordBreak: 'break-all', background: 'var(--field)', padding: 10, borderRadius: 10 }}>
-                Scan or type: {qrText}
+            {!lan.enabled && (
+              <div style={{ background: 'var(--field)', borderRadius: 12, padding: 12, fontSize: 12.5, fontWeight: 700, color: 'var(--ink2)' }}>
+                LAN pairing is off. Click <b>Enable LAN pairing</b> to show connection info for phones / tablets on this Wi-Fi.
+              </div>
+            )}
+            {lan.enabled && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <ConnCard label="Pairing PIN" value={lan.pin} mono copyLabel="Copy PIN" onCopy={(ok) => { if (ok) setMsg('Pairing PIN copied.'); }}/>
+                {parsed.ip && <ConnCard label="IP address (shop PC on Wi-Fi)" value={parsed.ip} mono copyLabel="Copy IP" onCopy={(ok) => { if (ok) setMsg('IP address copied.'); }}/>}
+                {parsed.port && <ConnCard label="Port number" value={parsed.port} mono copyLabel="Copy port" onCopy={(ok) => { if (ok) setMsg('Port number copied.'); }}/>}
+                {firstUrl && <ConnCard label="Full shop PC URL" value={firstUrl} copyLabel="Copy URL" onCopy={(ok) => { if (ok) setMsg('Shop PC URL copied — paste into the APK pairing screen.'); }}/>}
+                {qrText && (
+                  <ConnCard label="QR / JSON payload (for scanner)" value={qrText} copyLabel="Copy" onCopy={(ok) => { if (ok) setMsg('QR payload copied.'); }}/>
+                )}
               </div>
             )}
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -4146,7 +5374,7 @@ function MobileSyncPanel({ busy, setBusy, setMsg, msg }) {
                 try {
                   await window.electronAPI.lanEnable(!lan.enabled);
                   await refreshLan();
-                  setMsg(lan.enabled ? 'LAN pairing disabled.' : 'LAN pairing enabled — phones can pair on this Wi-Fi.');
+                  setMsg(lan.enabled ? 'LAN pairing disabled.' : 'LAN pairing enabled — give IP, port & PIN to the phone user.');
                 } catch (e) { setMsg(e.message || 'Could not toggle LAN'); }
                 finally { setBusy(false); }
               }}>{lan.enabled ? 'Disable LAN pairing' : 'Enable LAN pairing'}</button>
@@ -4164,44 +5392,49 @@ function MobileSyncPanel({ busy, setBusy, setMsg, msg }) {
             )}
           </>
         )}
-        <div style={{ fontSize: 12.5, fontWeight: 700 }}>This device {pair ? 'is paired' : 'is not paired'}{getNumberPrefix() ? ' · numbers ' + getNumberPrefix() : ''}.</div>
-        {lastSync && <div style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 600 }}>Last sync: {lastSync}</div>}
         {!hasLan && (
           <div>
-            <label className="field-l">Shop PC URL</label>
-            <input className="inp" value={pairUrl} onChange={(e) => setPairUrl(e.target.value)} placeholder="http://192.168.1.10:port"/>
-            <label className="field-l">PIN</label>
-            <input className="inp" value={pairPin} onChange={(e) => setPairPin(e.target.value)} placeholder="6-digit PIN"/>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: 150 }}>
+                <label className="field-l">Shop PC IP address</label>
+                <input className="inp" value={ip} onChange={(e) => setIp(e.target.value)} placeholder="192.168.1.10" inputMode="decimal" autoComplete="off"/>
+              </div>
+              <div style={{ flex: 1, minWidth: 110 }}>
+                <label className="field-l">Port</label>
+                <input className="inp" value={port} onChange={(e) => setPort(e.target.value)} placeholder="e.g. 51732" inputMode="numeric" autoComplete="off"/>
+              </div>
+            </div>
+            <label className="field-l">PIN (6 digits, from the shop PC Settings)</label>
+            <input className="inp" value={pairPin} onChange={(e) => setPairPin(e.target.value)} placeholder="6-digit PIN" inputMode="numeric" maxLength={6} autoComplete="one-time-code"/>
+            <div style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 700, marginTop: 8 }}>Address: {base || '—'}</div>
           </div>
         )}
+        <div style={{ fontSize: 12.5, fontWeight: 700 }}>This device {pair ? 'is paired' : 'is not paired'}{getNumberPrefix() ? ' · numbers ' + getNumberPrefix() : ''}.</div>
+        {lastSync && <div style={{ fontSize: 12, color: 'var(--mut)', fontWeight: 600 }}>Last sync: {lastSync}</div>}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {!hasLan && (
+            <button className="btn-o" disabled={busy} onClick={doTest}><Ic n="check" s={14}/>Test connection</button>
+          )}
           {!hasLan && !pair && (
-            <button className="btn-p" disabled={busy} onClick={async () => {
-              setBusy(true); setMsg('');
-              try {
-                let url = pairUrl, pin = pairPin;
-                if (window.SV_APK && window.SV_APK.scanPairingQr) {
-                  const scanned = await window.SV_APK.scanPairingQr();
-                  if (scanned && scanned.url) { url = scanned.url; pin = scanned.pairingPin || pin; }
-                }
-                await pairWithShop({ url, pin });
-                setMsg('Paired. Pull complete — you can work offline.');
-              } catch (e) { setMsg(e.message || 'Pair failed'); }
-              finally { setBusy(false); }
-            }}>Pair with shop PC</button>
+            <button className="btn-p" disabled={busy} onClick={doPair}>Pair with shop PC</button>
+          )}
+          {!hasLan && !pair && window.SV_APK && window.SV_APK.scanPairingQr && (
+            <button className="btn-o" disabled={busy} onClick={doScanPair}><Ic n="barcode" s={14}/>Scan QR</button>
           )}
           {pair && (
-            <button className="btn-p" disabled={busy} onClick={async () => {
-              setBusy(true); setMsg('');
-              try { await syncWithShop(); setMsg('Synced with shop PC.'); }
-              catch (e) { setMsg(e.message || 'Sync failed'); }
-              finally { setBusy(false); }
-            }}>Sync now</button>
+            <button className="btn-p" disabled={busy} onClick={doSync}>Sync now</button>
           )}
           {pair && (
             <button className="btn-o" disabled={busy} onClick={() => { unpairShop(); setMsg('Unpaired. Local data stays on this device.'); }}>Unpair</button>
           )}
         </div>
+        {pair && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+            <input type="checkbox" checked={autoSync} onChange={(e) => { const on = e.target.checked; setAutoSync(on); setAutoSyncEnabled(on); setMsg(on ? 'Auto-sync on — this device will sync when on the shop Wi-Fi.' : 'Auto-sync off.'); }}/>
+            Auto-sync while on the shop Wi-Fi
+          </label>
+        )}
+        {conn && <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--a-ink)' }}>{conn}</div>}
         {msg && <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--a-ink)' }}>{msg}</div>}
       </div>
     </div>
@@ -4585,15 +5818,84 @@ const ROUTE_MAP = {
   purchasing: Purchasing, reports: Reports, insights: Insights, team: Team, settings: Settings,
   service: ServiceRepair,
 };
+/**
+ * Phone / tablet browser opened over Wi-Fi on the shop PC's live data.
+ * The PC answers 401 until the shop PIN is supplied; without this prompt the
+ * device silently fell back to its own local copy and drifted out of step.
+ */
+function LanPinGate() {
+  const [need, setNeed] = useState(false);
+  const [pin, setPin] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const f = (e) => setNeed(!!(e && e.detail && e.detail.required));
+    window.addEventListener('sv-lan-auth', f);
+    setNeed(lanAuthRequired);
+    return () => window.removeEventListener('sv-lan-auth', f);
+  }, []);
+  if (!need) return null;
+  const connect = async () => {
+    const p = String(pin || '').trim();
+    if (!p) { setErr('Enter the PIN shown on the shop PC.'); return; }
+    setBusy(true); setErr('');
+    try {
+      const res = await fetch(API_URL + '?t=' + Date.now(), { cache: 'no-store', headers: { 'X-SV-PIN': p } });
+      if (res && res.ok) { setLanPin(p); window.location.reload(); return; }
+      setErr(res && res.status === 403 ? 'Wi-Fi sharing is off on the shop PC.' : 'Wrong PIN.');
+    } catch (e) { setErr('Cannot reach the shop PC.'); }
+    finally { setBusy(false); }
+  };
+  const el = React.createElement;
+  return el('div', { style: { position: 'fixed', left: 12, right: 12, bottom: 12, zIndex: 90, background: '#fff', border: '1px solid var(--ln)', borderRadius: 14, boxShadow: '0 12px 40px rgba(40,35,20,.18)', padding: 14, maxWidth: 520, marginLeft: 'auto', marginRight: 'auto' } },
+    el('div', { style: { fontSize: 13.5, fontWeight: 800, marginBottom: 4 } }, 'Not connected to the shop PC'),
+    el('div', { style: { fontSize: 12.5, fontWeight: 600, color: 'var(--ink2)', lineHeight: 1.45, marginBottom: 10 } },
+      'This device is showing its own local copy, so changes here will not reach the shop. Enter the PIN from the shop PC (Settings) to work on the live shop data.'),
+    el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+      el('input', { className: 'inp', style: { flex: 1, minWidth: 130 }, value: pin, inputMode: 'numeric', maxLength: 6, placeholder: '6-digit PIN', onChange: (e) => setPin(e.target.value) }),
+      el('button', { className: 'btn-p', disabled: busy, onClick: connect }, 'Connect'),
+      el('button', { className: 'btn-o', disabled: busy, onClick: () => setNeed(false) }, 'Later')),
+    err ? el('div', { style: { fontSize: 12, fontWeight: 700, color: 'var(--red)', marginTop: 8 } }, err) : null);
+}
+/**
+ * Watches the shop database for writes this window did not make — a phone
+ * syncing, a CSV restore, another tablet saving — and pulls them in. Without it
+ * each device kept its own copy from start-up and the last one to save won.
+ */
+function ShopStatePoll() {
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    let running = false;
+    const run = async () => {
+      if (running) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
+      running = true;
+      try { await pullServerChanges(); } catch (e) { /* offline — next tick */ }
+      finally { running = false; }
+    };
+    const iv = setInterval(run, 4000);
+    window.addEventListener('focus', run);
+    return () => { clearInterval(iv); window.removeEventListener('focus', run); };
+  }, []);
+  return null;
+}
 function SmartVisionApp() {
   const { pathname } = useLocation();
+  // Bumped when data arrives from elsewhere; remounting the page is what makes
+  // the restored / synced records appear instead of the stale ones on screen.
+  const [dataVersion, setDataVersion] = useState(0);
   useEffect(() => {
     if (!isLoggedIn()) window.location.replace('./index.html');
+  }, []);
+  useEffect(() => {
+    const f = () => setDataVersion((n) => n + 1);
+    window.addEventListener('sv-remote-change', f);
+    return () => window.removeEventListener('sv-remote-change', f);
   }, []);
   if (!isLoggedIn()) return null;
   const path = routeKey(pathname);
   const Cmp = ROUTE_MAP[path] || Dashboard;
-  return <Cmp />;
+  return <><ShopAutoSync/><ShopStatePoll/><LanPinGate/><ScanOnceHost/><Cmp key={dataVersion} /></>;
 }
 class AppErrorBoundary extends React.Component {
   constructor(props) {

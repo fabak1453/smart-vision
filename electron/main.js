@@ -276,6 +276,32 @@ ipcMain.handle('lan:rotatePin', async () => {
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 
+/**
+ * Windows Firewall is the usual reason a phone / tablet "cannot reach" the shop
+ * PC: the ERP binds 0.0.0.0 fine, but inbound connections are dropped until the
+ * app is allowed through. This adds a rule for the app itself (not a port), so
+ * it keeps working when the LAN port changes.
+ */
+ipcMain.handle('lan:allowFirewall', async () => {
+  if (process.platform !== 'win32') return { ok: false, error: 'Windows only.' };
+  const { execFile } = require('child_process');
+  const exe = process.execPath;
+  const rule = 'Smart Vision ERP (Wi-Fi sync)';
+  const args = [
+    'advfirewall', 'firewall', 'add', 'rule',
+    'name=' + rule, 'dir=in', 'action=allow',
+    'program=' + exe, 'enable=yes', 'profile=private,domain',
+  ];
+  const quoted = args.map((a) => "'" + String(a).replace(/'/g, "''") + "'").join(',');
+  const ps = 'Start-Process -Verb RunAs -Wait -WindowStyle Hidden -FilePath netsh -ArgumentList ' + quoted;
+  return new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], (err) => {
+      if (err) return resolve({ ok: false, error: 'Could not add the firewall rule. Approve the Windows prompt, or allow Smart Vision ERP manually in Windows Defender Firewall.' });
+      resolve({ ok: true });
+    });
+  });
+});
+
 ipcMain.handle('whatsapp:open', async (_e, payload) => {
   let savedPath = null;
   const whatsappWebUrl = payload && payload.whatsappWebUrl;
@@ -288,23 +314,36 @@ ipcMain.handle('whatsapp:open', async (_e, payload) => {
         show: false,
         webPreferences: { sandbox: false, contextIsolation: true },
       });
-      await pdfWin.loadURL(pdfUrl);
-      await new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('PDF page load timeout')), 15000);
-        pdfWin.webContents.once('did-finish-load', () => { clearTimeout(t); resolve(); });
-      });
+      // loadURL resolves on did-finish-load. Waiting for that event again after it
+      // (as this used to) never fires, so every export hit the 15 s timeout and
+      // no PDF was saved. Bound the load itself instead.
+      await Promise.race([
+        pdfWin.loadURL(pdfUrl),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('PDF page load timeout')), 15000)),
+      ]);
       try {
-        await pdfWin.webContents.executeJavaScript('document.fonts && document.fonts.ready');
+        // Fonts and the logo must be in before printing, or the PDF has a hole.
+        await pdfWin.webContents.executeJavaScript(
+          'Promise.all([document.fonts ? document.fonts.ready : null].concat('
+          + 'Array.from(document.images).map((i) => (i.complete ? null : new Promise((r) => { i.onload = i.onerror = r; })))))'
+        );
       } catch (e) { /* ignore */ }
-      await new Promise((r) => setTimeout(r, 350));
+      await new Promise((r) => setTimeout(r, 150));
+      // A4 with the page margins from the document's own @page rule. (The old
+      // `marginsType` option is not an Electron 33 option: it was ignored and the
+      // PDF came out US Letter with default margins on top of the page's own.)
       const buf = await pdfWin.webContents.printToPDF({
         printBackground: true,
-        marginsType: 1,
+        pageSize: 'A4',
+        preferCSSPageSize: true,
+        margins: { top: 0, bottom: 0, left: 0, right: 0 },
       });
       if (!buf || buf.length < 500) throw new Error('PDF buffer empty');
       const safeName = String(filename).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
       savedPath = path.join(app.getPath('downloads'), safeName);
       fs.writeFileSync(savedPath, buf);
+      // Open Downloads with the PDF selected: drag it straight into the WhatsApp chat.
+      try { shell.showItemInFolder(savedPath); } catch (e) { /* ignore */ }
     } catch (e) {
       console.error('pdf export failed', e);
     } finally {
@@ -321,7 +360,7 @@ ipcMain.handle('whatsapp:open', async (_e, payload) => {
         title: 'WhatsApp Web',
         message: 'PDF saved to your Downloads folder',
         detail: path.basename(savedPath)
-          + '\n\nWhatsApp Web is opening in your browser. Use the attach (📎) button and select this PDF to send it.',
+          + '\n\nWhatsApp Web is opening in your browser, and the Downloads folder is open with this PDF selected: drag it into the chat (or use 📎 Attach).',
         buttons: ['OK'],
       });
     } catch (e) { /* ignore */ }
@@ -329,12 +368,34 @@ ipcMain.handle('whatsapp:open', async (_e, payload) => {
   return { ok: true, pdfPath: savedPath };
 });
 
+const startupError = require('./startup-error');
+let fatalShown = false;
+/**
+ * A short, plain message for the person at the PC; the full details go to a log
+ * file (Open log folder). It used to put the whole stack trace in the dialog.
+ */
 function showFatalError(title, err) {
   const detail = err && (err.stack || err.message || String(err));
   console.error(title, detail);
+  if (fatalShown) return; // one dialog, not a cascade of follow-up errors
+  fatalShown = true;
+  const info = startupError.explain(err, 'Smart Vision ERP');
+  let logFile = '';
+  try { logFile = startupError.writeLog(path.join(app.getPath('userData'), 'logs'), err, { app: app.getVersion(), kind: info.kind }); } catch (e) { /* ignore */ }
   try {
-    dialog.showErrorBox(title, detail || 'Unknown error');
-  } catch (e) { /* headless */ }
+    const choice = dialog.showMessageBoxSync({
+      type: 'error',
+      title: info.title,
+      message: info.title,
+      detail: info.message + (logFile ? '\n\nDetails saved in:\n' + logFile : ''),
+      buttons: logFile ? ['Open log folder', 'Close'] : ['Close'],
+      defaultId: logFile ? 1 : 0,
+      noLink: true,
+    });
+    if (logFile && choice === 0) shell.showItemInFolder(logFile);
+  } catch (e) {
+    try { dialog.showErrorBox(info.title, info.message); } catch (e2) { /* headless */ }
+  }
 }
 
 process.on('uncaughtException', (err) => {

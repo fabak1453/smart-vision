@@ -107,6 +107,8 @@
     if (!state.DB || typeof state.DB !== 'object') state.DB = {};
     if (state.revision == null) state.revision = 0;
     ensureStockMoves(state);
+    tombstoneList(state);
+    collapseDeleted(state);
     walkTables(state, (_t, row) => stampRow(row, deviceId, { bump: false }));
     (state.DB.stock_moves || []).forEach((m) => stampRow(m, deviceId, { bump: false }));
     return state;
@@ -160,6 +162,71 @@
     if (!row) return;
     stampRow(row, deviceId);
     row.deleted_at = nowIso();
+  }
+
+  /* ---------------- deletions ----------------
+     A deleted record leaves its table and is remembered in DB.tombstones as
+     { table, uuid, deleted_at }. Rows left in place with deleted_at were still
+     shown everywhere (the screens don't filter them), and without the record a
+     device that still had the row handed it back on its next sync and the shop
+     PC re-created it. */
+  function tombstoneList(state) {
+    if (!state.DB || typeof state.DB !== 'object') state.DB = {};
+    if (!Array.isArray(state.DB.tombstones)) state.DB.tombstones = [];
+    return state.DB.tombstones;
+  }
+  function findTombstone(state, table, uuid) {
+    if (!uuid) return null;
+    return tombstoneList(state).find((t) => t && t.table === table && t.uuid === uuid) || null;
+  }
+  function addTombstone(state, table, row, deviceId, at) {
+    if (!row || !row.uuid) return null;
+    const when = at || row.deleted_at || nowIso();
+    const prev = findTombstone(state, table, row.uuid);
+    if (prev) {
+      if (Date.parse(when) > Date.parse(prev.deleted_at || 0)) { prev.deleted_at = when; prev.updated_at = when; }
+      return prev;
+    }
+    const t = { table, uuid: row.uuid, deleted_at: when, updated_at: when, origin_device: deviceId || row.origin_device || '' };
+    tombstoneList(state).push(t);
+    return t;
+  }
+  function removeTombstone(state, table, uuid) {
+    const list = tombstoneList(state);
+    const i = list.findIndex((t) => t && t.table === table && t.uuid === uuid);
+    if (i >= 0) list.splice(i, 1);
+  }
+  function tableArray(state, table) {
+    if (table === 'team') return state.TEAM || (state.TEAM = []);
+    if (table === 'catalog') return state.CATALOG || (state.CATALOG = []);
+    return state.DB[table] || (state.DB[table] = []);
+  }
+  /** Move rows that carry deleted_at out of their tables into DB.tombstones, in place. */
+  function collapseDeleted(state) {
+    if (!state || !state.DB) return;
+    TABLE_KEYS.concat(['team', 'catalog']).forEach((table) => {
+      const arr = table === 'team' ? state.TEAM : table === 'catalog' ? state.CATALOG : state.DB[table];
+      if (!Array.isArray(arr)) return;
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const r = arr[i];
+        if (r && r.deleted_at) {
+          addTombstone(state, table, r, r.origin_device, r.deleted_at);
+          arr.splice(i, 1);
+        }
+      }
+    });
+  }
+  /** Delete one record by uuid. An edit made here after the other side's delete wins. */
+  function deleteFromState(state, table, d, deviceId, at) {
+    const when = at || d.deleted_at || nowIso();
+    const arr = tableArray(state, table);
+    const i = d.uuid ? arr.findIndex((x) => x && x.uuid === d.uuid) : -1;
+    if (i >= 0) {
+      if (Date.parse(arr[i].updated_at || 0) > Date.parse(when)) return false;
+      arr.splice(i, 1);
+    }
+    addTombstone(state, table, d, deviceId, when);
+    return true;
   }
 
   function liveRows(arr) {
@@ -251,20 +318,56 @@
     return nextId(arr);
   }
 
-  function applyUpsert(state, table, row) {
-    const isTeam = table === 'team';
-    const isCat = table === 'catalog';
-    const arr = isTeam ? state.TEAM : isCat ? state.CATALOG : (state.DB[table] || (state.DB[table] = []));
-    const idx = findByUuidOrKey(arr, row, table);
-    if (idx < 0) {
-      const copy = { ...row, id: nextIdFor(arr, row) };
-      arr.push(copy);
-      return copy;
+  /**
+   * Insert or merge one incoming record. `ctx` collects what changed identity so
+   * the caller can re-point references: ctx.ids[table][oldId] = newId, and
+   * ctx.alias[incomingUuid] = keptUuid.
+   */
+  function applyUpsert(state, table, row, ctx) {
+    const c = ctx || { ids: {}, alias: {} };
+    if (!row || typeof row !== 'object') return null;
+    const arr = tableArray(state, table);
+    if (row.deleted_at) { deleteFromState(state, table, row, row.origin_device, row.deleted_at); return null; }
+    const tomb = findTombstone(state, table, row.uuid);
+    if (tomb) {
+      // Deleted on this side. A device that merely still has the record must not
+      // bring it back; only an edit made after the delete does (last change wins).
+      if (!(Date.parse(row.updated_at || 0) > Date.parse(tomb.deleted_at || 0))) return null;
+      removeTombstone(state, table, row.uuid);
     }
-    const merged = mergeRow(table, arr[idx], row);
-    merged.id = arr[idx].id;
-    arr[idx] = merged;
-    return merged;
+    const idx = findByUuidOrKey(arr, row, table);
+    let out;
+    if (idx < 0) {
+      out = { ...row, id: nextIdFor(arr, row) };
+      arr.push(out);
+    } else {
+      const cur = arr[idx];
+      out = { ...mergeRow(table, cur, row), id: cur.id };
+      if (cur.uuid && row.uuid && cur.uuid !== row.uuid) {
+        // The same record entered on two devices (matched by SKU / number / name).
+        // Keep the existing identity: stock moves, serials and lines already point
+        // at it. The newcomer's references are re-pointed through ctx.alias.
+        out.uuid = cur.uuid;
+        if (table === 'products' && cur.stock_baseline != null) out.stock_baseline = cur.stock_baseline;
+        c.alias[row.uuid] = cur.uuid;
+      }
+      arr[idx] = out;
+    }
+    if (row.id != null && row.id !== '' && out.id !== row.id) {
+      (c.ids[table] || (c.ids[table] = {}))[String(row.id)] = out.id;
+    }
+    return out;
+  }
+
+  /** Lines (quotes, invoices, POs) name their product by id; follow any renumbering. */
+  const LINE_TABLES = ['quotes', 'invoices', 'purchaseOrders'];
+  function remapLineProducts(row, idMap) {
+    if (!idMap || !Array.isArray(row.items)) return;
+    row.items.forEach((it) => {
+      if (!it || it.product_id == null || it.product_id === '') return;
+      const to = idMap[String(it.product_id)];
+      if (to != null) it.product_id = to;
+    });
   }
 
   function remapNameRefs(state) {
@@ -291,27 +394,36 @@
    * Merge phone upserts into PC snapshot (PC is source of truth after merge).
    * Does not re-run genNum / convertQuote.
    */
-  function applySyncPayload(pcState, payload) {
+  function applySyncPayload(pcState, payloadIn) {
     const state = cloneState(pcState);
     ensureSyncMeta(state);
-    const upserts = (payload && payload.upserts) || {};
-    Object.keys(upserts).forEach((table) => {
-      (upserts[table] || []).forEach((row) => applyUpsert(state, table, row));
+    const payload = cloneState(payloadIn || {});
+    const ctx = { ids: {}, alias: {} };
+    const upserts = payload.upserts || {};
+    // Products first: a new product can get a different id here than it had on
+    // the device, and quote / invoice / PO lines point at products by id.
+    const tables = Object.keys(upserts).sort((a, b) => (b === 'products') - (a === 'products'));
+    tables.forEach((table) => {
+      (upserts[table] || []).forEach((row) => {
+        if (!row || typeof row !== 'object') return;
+        if (LINE_TABLES.includes(table)) remapLineProducts(row, ctx.ids.products);
+        if (table === 'stock_moves' && ctx.alias[row.product_uuid]) row.product_uuid = ctx.alias[row.product_uuid];
+        applyUpsert(state, table, row, ctx);
+      });
     });
-    (payload && payload.deletes || []).forEach((d) => {
-      const table = d.table;
-      const arr = table === 'team' ? state.TEAM : table === 'catalog' ? state.CATALOG : state.DB[table];
-      if (!arr) return;
-      const idx = findByUuidOrKey(arr, d, table);
-      if (idx >= 0) tombstone(arr[idx], payload.device_id);
+    (payload.deletes || []).forEach((d) => {
+      if (d && d.table && d.uuid) deleteFromState(state, d.table, d, payload.device_id, d.deleted_at);
     });
     const seenMove = new Set((state.DB.stock_moves || []).map((m) => m.uuid));
-    (payload && payload.stock_moves || []).forEach((m) => {
+    (payload.stock_moves || []).forEach((m) => {
       if (!m || seenMove.has(m.uuid)) return;
       seenMove.add(m.uuid);
-      state.DB.stock_moves.push({ ...m });
+      const move = { ...m };
+      if (ctx.alias[move.product_uuid]) move.product_uuid = ctx.alias[move.product_uuid];
+      state.DB.stock_moves.push(move);
     });
     remapNameRefs(state);
+    collapseDeleted(state);
     recomputeStock(state);
     state.revision = num(state.revision) + 1;
     state.savedAt = Date.now();
@@ -325,10 +437,7 @@
       upserts[t] = liveRows(localState.DB[t]).filter((r) => r.origin_device || r.updated_at);
     });
     upserts.team = liveRows(localState.TEAM);
-    const deletes = [];
-    walkTables(localState, (table, row) => {
-      if (row && row.deleted_at) deletes.push({ table, uuid: row.uuid, deleted_at: row.deleted_at, updated_at: row.updated_at });
-    });
+    const deletes = tombstoneList(localState).map((t) => ({ table: t.table, uuid: t.uuid, deleted_at: t.deleted_at, updated_at: t.updated_at }));
     return {
       device_id: localState.device_id || '',
       base_revision: baseRevision,
@@ -351,18 +460,22 @@
     });
     payload.upserts.team = (localState.TEAM || []).filter((r) => r && r.uuid && !pcUuids.has(r.uuid));
     payload.stock_moves = (localState.DB.stock_moves || []).filter((m) => m && m.uuid && !pcUuids.has(m.uuid));
-    walkTables(localState, (table, row) => {
-      if (row && row.deleted_at && pcUuids.has(row.uuid)) {
-        payload.deletes.push({ table, uuid: row.uuid, deleted_at: row.deleted_at, updated_at: row.updated_at });
-      }
+    const pcTomb = new Set(tombstoneList(pc).map((t) => t.table + ':' + t.uuid));
+    tombstoneList(localState).forEach((t) => {
+      if (!pcTomb.has(t.table + ':' + t.uuid)) payload.deletes.push({ table: t.table, uuid: t.uuid, deleted_at: t.deleted_at, updated_at: t.updated_at });
     });
     return payload;
   }
 
-  /** Phone rebase: keep local-only uuids, overlay PC snapshot. */
+  /**
+   * Rebase this device's data onto a newer snapshot from the shop PC: its new
+   * records, its deletes AND its edits to existing records are replayed, and the
+   * merge keeps whichever side changed each record last. (Replaying only new
+   * records silently threw away edits — a price change, a payment.)
+   */
   function rebaseLocal(pcSnapshot, localState) {
     const pc = cloneState(pcSnapshot);
-    return applySyncPayload(pc, localOnlyPayload(pcSnapshot, localState));
+    return applySyncPayload(pc, collectPending(cloneState(localState), num(pc.revision)));
   }
 
   function nextDevicePrefix(existing) {
@@ -387,6 +500,8 @@
     appendStockMove,
     recomputeStock,
     tombstone,
+    addTombstone,
+    collapseDeleted,
     liveRows,
     applySyncPayload,
     collectPending,

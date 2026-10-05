@@ -17,4 +17,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   lanStatus: () => ipcRenderer.invoke('lan:status'),
   lanEnable: (on) => ipcRenderer.invoke('lan:enable', on),
   lanRotatePin: () => ipcRenderer.invoke('lan:rotatePin'),
+  lanAllowFirewall: () => ipcRenderer.invoke('lan:allowFirewall'),
 });

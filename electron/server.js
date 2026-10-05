@@ -75,12 +75,38 @@ function setLanEnabled(on) {
     }
     pairing.setEnabled(true);
     if (lanServer && lanPort) return resolve(pairing.status(lanPort));
-    lanServer = createAppServer(appDirRef);
-    lanServer.listen(0, '0.0.0.0', () => {
-      lanPort = lanServer.address().port;
-      resolve(pairing.status(lanPort));
-    });
-    lanServer.on('error', reject);
+
+    // Reuse the last port so the phone's saved IP:port keeps working after the
+    // app restarts. Fall back to a random free port if it is already taken.
+    const preferred = pairing.getLanPort();
+    let settled = false;
+    const fail = (err) => { if (!settled) { settled = true; reject(err); } };
+    const bind = (port) => {
+      const srv = createAppServer(appDirRef);
+      lanServer = srv;
+      const onError = (err) => {
+        srv.removeListener('listening', onListening);
+        try { srv.close(); } catch (e) { /* ignore */ }
+        if (lanServer === srv) lanServer = null;
+        if (!settled && err && err.code === 'EADDRINUSE' && port !== 0) {
+          bind(0); // remembered port busy → take any free port
+          return;
+        }
+        fail(err);
+      };
+      const onListening = () => {
+        srv.removeListener('error', onError);
+        if (settled) return;
+        settled = true;
+        lanPort = srv.address().port;
+        pairing.setLanPort(lanPort);
+        resolve(pairing.status(lanPort));
+      };
+      srv.once('listening', onListening);
+      srv.once('error', onError);
+      srv.listen(port, '0.0.0.0');
+    };
+    bind(preferred);
   });
 }
 
@@ -96,14 +122,37 @@ function handle(req, res, appDir) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-SV-PIN, Authorization');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  // Chrome Private Network Access: a phone browser / the APK on https://localhost
+  // calling an http://192.168.x.x shop PC must be allowed to do so.
+  res.setHeader('Access-Control-Allow-Private-Network', 'true');
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
   }
 
+  // ---- LAN health check (no secret leaks; usable by phone browsers + the APK) ----
+  if (urlPath.replace(/\/+$/, '').endsWith('/api/ping')) {
+    return json(res, 200, { ok: true, service: 'smart-vision-erp' });
+  }
+  // ---- cheap change stamp: lets every device notice a write it did not make ----
+  if (urlPath.replace(/\/+$/, '').endsWith('/api/revision')) {
+    if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
+    const stampAuth = pairing.requireDataAuth(req);
+    if (!stampAuth.ok) return json(res, stampAuth.status || 401, { error: stampAuth.error });
+    try { return json(res, 200, store.stateStamp()); }
+    catch (e) { return json(res, 200, { seq: 0, revision: 0, savedAt: 0 }); }
+  }
+
+  if (urlPath.replace(/\/+$/, '').endsWith('/api/status')) {
+    if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
+    return json(res, 200, pairing.publicStatus(lanPort || loopbackPort));
+  }
+
   if (urlPath.replace(/\/+$/, '').endsWith('/api/pair')) {
     if (req.method === 'GET') {
-      if (!local) return json(res, 403, { error: 'pairing info is local only' });
+      // The PIN is a local secret; LAN clients get reachability only. The shop PC
+      // (loopback) still receives the full status so Settings can render it.
+      if (!local) return json(res, 200, pairing.publicStatus(lanPort || loopbackPort));
       return json(res, 200, pairing.status(loopbackPort));
     }
     if (req.method === 'POST') {
@@ -115,6 +164,7 @@ function handle(req, res, appDir) {
           let snapshot = {};
           try { snapshot = JSON.parse(store.loadState() || '{}'); } catch (e) { snapshot = {}; }
           Erp.ensureSyncMeta(snapshot, { deviceId: 'shop' });
+          if (!Number(snapshot.savedAt)) snapshot.savedAt = Date.now();
           store.saveState(JSON.stringify(snapshot));
           return json(res, 200, {
             ok: true,
@@ -151,6 +201,7 @@ function handle(req, res, appDir) {
           return json(res, 409, { error: 'stale revision', snapshot: pc, revision: liveRev });
         }
         const merged = Erp.applySyncPayload(pc, payload);
+        merged.savedAt = Date.now();
         store.saveState(JSON.stringify(merged));
         return json(res, 200, { ok: true, snapshot: merged, revision: merged.revision });
       } catch (e) {
@@ -185,10 +236,10 @@ function handle(req, res, appDir) {
 
   // ---- data API (same contract as api.php / server.py / Netlify fn) ----
   if (urlPath.replace(/\/+$/, '').endsWith('/api.php')) {
-    if (!local) {
-      const auth = pairing.requireAuth(req);
-      if (!auth.ok) return json(res, auth.status || 401, { error: auth.error || 'Unauthorized' });
-      if (req.method === 'POST') return json(res, 403, { error: 'full snapshot POST is not allowed from the phone — use /api/sync' });
+    const dataAuth = pairing.requireDataAuth(req);
+    if (!dataAuth.ok) return json(res, dataAuth.status || 401, { error: dataAuth.error || 'Unauthorized' });
+    if (req.method === 'POST' && !dataAuth.write) {
+      return json(res, 403, { error: 'full snapshot POST is not allowed from a paired device — use /api/sync' });
     }
     if (req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -197,9 +248,20 @@ function handle(req, res, appDir) {
     if (req.method === 'POST') {
       return readBody(req, res, (body) => {
         try {
-          store.saveState(body || 'null');
+          // The client tells us which version it was working from. If the
+          // database has moved since (a phone synced, a CSV was restored,
+          // another tablet saved), refuse instead of overwriting their work.
+          const baseHeader = req.headers && (req.headers['x-sv-base-seq'] || req.headers['X-SV-Base-Seq']);
+          const base = baseHeader == null || baseHeader === '' ? null : Number(baseHeader);
+          const current = store.stateStamp();
+          if (base != null && Number.isFinite(base) && base !== current.seq) {
+            let snapshot = {};
+            try { snapshot = JSON.parse(store.loadState() || '{}'); } catch (e2) { snapshot = {}; }
+            return json(res, 409, { error: 'stale snapshot', snapshot, seq: current.seq, revision: current.revision });
+          }
+          const saved = store.saveState(body || 'null');
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, bytes: body.length }));
+          res.end(JSON.stringify({ ok: true, bytes: body.length, seq: saved.seq, revision: saved.revision, savedAt: saved.savedAt }));
         } catch (e) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'invalid json' }));
@@ -247,9 +309,13 @@ function handle(req, res, appDir) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: 'Incomplete backup (missing ## ' + omitted.join(', ## ') + '). Restore cancelled so live data is not wiped.' }));
         }
-        store.saveState(JSON.stringify(parsed.state));
+        // Stamp the restore as "now" so it beats any older copy a device is
+        // still holding; without this the PC re-applied its own stale snapshot
+        // on the next start and silently undid the restore.
+        const restored = Object.assign({}, parsed.state, { savedAt: Date.now() });
+        const saved = store.saveState(JSON.stringify(restored));
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, restored: parsed.counts }));
+        res.end(JSON.stringify({ ok: true, restored: parsed.counts, seq: saved.seq }));
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message || 'invalid backup' }));
@@ -276,10 +342,13 @@ function handle(req, res, appDir) {
         try { state = JSON.parse(store.loadState() || '{}'); } catch (e) { state = {}; }
         const customers = (state.DB && state.DB.customers) || [];
         const customer = customers.find((c) => c.name === customerName);
-        const phone = normalizePhone(customer && customer.phone);
+        // A document (bill / quote) may carry its own mobile number; it wins over
+        // the customer record so a one-off number reaches the right person.
+        const docPhone = payload.doc && payload.doc.phone;
+        const phone = normalizePhone(docPhone) || normalizePhone(customer && customer.phone);
         if (!phone) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: `No phone number on file for "${customerName}".` }));
+          return res.end(JSON.stringify({ error: `No mobile number for "${customerName}". Add one on the customer, or on this document.` }));
         }
         const whatsappWebUrl = `https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(message)}`;
         let pdfUrl = null;

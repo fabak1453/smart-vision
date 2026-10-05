@@ -1,15 +1,15 @@
-# Smart Vision ERP v9.5.0
+# Smart Vision ERP v9.8.1
 
 Windows desktop CCTV ERP — SQLite, offline license, Excel CSV backup, Google Drive sync. Android APK lives in **[apk/](apk/README.md)** and is not part of the Windows installer.
 
-Full docs: **[docs/README.md](docs/README.md)**
+Full docs: **[docs/README.md](docs/README.md)** · What changed: **[CHANGELOG-9.8.1.md](CHANGELOG-9.8.1.md)** · [CHANGELOG-9.6.1.md](CHANGELOG-9.6.1.md) · [CHANGELOG-9.6.0.md](CHANGELOG-9.6.0.md)
 
 ## Ship this
 
 | | |
 |---|---|
-| **Installer** | `dist/Smart Vision ERP Setup 9.5.0.exe` |
-| **Portable** | `dist/Smart Vision ERP 9.5.0 Portable.exe` |
+| **Installer** | `dist/Smart Vision ERP Setup 9.8.1.exe` |
+| **Portable** | `dist/Smart Vision ERP 9.8.1 Portable.exe` |
 | **Owner login** | `smart` / `1234` |
 | **Team login** | Username + password under **Team & Owners** |
 
@@ -32,10 +32,20 @@ After a Mac→Windows dist, run `npm install` again before `npm start` on the Ma
 npm install
 npm start
 npm run prepare-app          # compile JSX only
+npm test                     # = node scripts/verify.js: rebuild + syntax + every test-*.js
 node test-wiring.js
 node test-reliability.js
 node test-sync-merge.js
+node test-wifi-sync.js
+node test-lan-access.js
+node test-bill-contact.js
+node test-resilience.js
+node test-bill-pdf.js
 ```
+
+## AI agent in Zed
+
+A read → write → verify → debug agent for this repo: **[docs/zed-agent.md](docs/zed-agent.md)**.
 
 ## Data on the PC
 

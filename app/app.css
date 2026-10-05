@@ -247,7 +247,9 @@ button{font-family:inherit;cursor:pointer}
   .bnav{display:flex}
   .stc-row{grid-template-columns:repeat(2,1fr);gap:10px}
   .ph h1{font-size:19px}
-  .tb{padding:0 14px;gap:10px}
+  .tb{padding:0 14px;gap:8px}
+  .tb .spacer{display:none}
+  .srch{max-width:none}
   .desk-only{display:none !important}
   .drawer{width:100%;max-width:100%}
 }
@@ -321,3 +323,11 @@ button{font-family:inherit;cursor:pointer}
   .sheet{width:auto!important;min-height:auto!important;box-shadow:none!important;padding:0!important}
   @page{size:A4;margin:14mm}
 }
+
+/* ---------- camera scanner (app/scanner.js) ---------- */
+.cam-scan{margin-top:10px}
+.cam-view{position:relative;width:100%;aspect-ratio:4/3;background:#111;border-radius:12px;overflow:hidden}
+.cam-view video{width:100%;height:100%;object-fit:cover;display:block}
+.cam-aim{position:absolute;left:5%;right:5%;top:20%;bottom:20%;border:2px solid rgba(255,255,255,.85);border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.28);pointer-events:none}
+.cam-wait{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:13px}
+.cam-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:440px;max-width:94vw;max-height:92vh;overflow-y:auto;background:var(--card);border-radius:16px;padding:18px;z-index:81;box-shadow:0 20px 60px rgba(40,35,20,.3)}

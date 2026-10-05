@@ -5,3 +5,29 @@ dist/
 build/certs/
 apk/node_modules/
 apk/www/
+
+# Gradle / Android build outputs and caches
+.gradle/
+.gradlehome/
+.gradleHome/
+apk/android/.gradle/
+apk/android/app/build/
+apk/android/build/
+apk/android/.kotlin/
+apk/android/capacitor-cordova-android-plugins/
+apk/android/local.properties
+**/build/intermediates/
+**/build/generated/
+**/build/outputs/
+*.apk
+*.aab
+
+# Debug / local artifacts
+.dbg/
+debug-exe-dist-installer.md
+
+# Secrets, licence tooling and signing material
+keygen/
+build/certs/
+*.jks
+*.keystore

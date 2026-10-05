@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launch (splash) background for AppTheme.NoActionBarLaunch.
+     Matches the ERP UI background (#faf9f6) so the window blends into the WebView. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#faf9f6" />
+</shape>

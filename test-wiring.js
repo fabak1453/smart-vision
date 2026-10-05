@@ -15,6 +15,7 @@ code += `\nglobalThis.__T = { DB, TEAM, ENTITIES, createInvoice, convertQuote, r
   buildBackupCsvBlob, buildBackupCsvText, importBackupCsv, authenticateCredentials, findTeamMemberByLogin,
   normalizeQuoteItems, lineItemQty, parseQtyFromDescription, validateStockForLines, healAcceptedQuoteLinks,
   searchPayload, routeKey, entityApplyEdit, ledgerCatNames, rememberLedgerCategory, addScannedSerial,
+  productSerialRows, shopBaseFromParts, csvDownloadUrl,
   persistStateNow, applyState, attachCustomerDetail, bootPromise };\n`;
 
 // ---- browser stubs ----
@@ -228,6 +229,21 @@ const specsHit = T.searchPayload('colorvu');
 ok(specsHit.results.products.some((p) => /ColorVu/i.test(p.specs)), 'search finds inventory by specs text');
 ok(T.routeKey('/inventory?open=7') === 'inventory', 'hash query does not break inventory route');
 ok(String(T.searchPayload('hikvision').results.products.length) !== '0', 'search returns hikvision products');
+// serial-number search: the product behind a serial must surface, tagged with the serial
+const bySerial = T.searchPayload('CAM-HIK-201-SN0001');
+ok(bySerial.results.products.some((p) => p.sku === 'CAM-HIK-201'), 'search by full serial number returns the product');
+ok(bySerial.results.products.some((p) => (p.matched_serials || []).indexOf('CAM-HIK-201-SN0001') >= 0), 'product result carries the matched serial number');
+const bySerialPartial = T.searchPayload('DVR-HIK-104-SN0003');
+ok(bySerialPartial.results.products.some((p) => p.sku === 'DVR-HIK-104'), 'search by repair serial returns the product');
+const dome = DB.products.find((p) => p.sku === 'CAM-HIK-201');
+const domeSerials = T.productSerialRows(dome);
+ok(domeSerials.some((s) => s.serial_no === 'CAM-HIK-201-SN0001'), 'productSerialRows lists registered serials');
+ok(domeSerials.some((s) => s.source === 'equipment'), 'productSerialRows also lists installed equipment serials');
+// a serial whose product is stored as a SKU (not the display name) must still resolve
+DB.serials.push({ id: 777001, serial_no: 'SKU-REF-0001', product: { sku: 'CAM-HIK-201' }, status: 'in_stock' });
+ok(T.searchPayload('SKU-REF-0001').results.products.some((p) => p.sku === 'CAM-HIK-201'), 'serial stored by product SKU resolves to the product');
+ok(T.productSerialRows(dome).some((s) => s.serial_no === 'SKU-REF-0001'), 'productSerialRows matches a SKU-referenced serial');
+DB.serials.pop();
 T.healAcceptedQuoteLinks();
 const qt1002 = DB.quotes.find((x) => x.number === 'QT-1002');
 ok(qt1002 && qt1002.converted && qt1002.invoice_number, 'seed accepted quote stays linked after heal');

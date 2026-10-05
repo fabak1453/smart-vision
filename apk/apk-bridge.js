@@ -10,6 +10,12 @@
       const r = await window.Capacitor.Plugins.BarcodeScanner.scan();
       return (r && (r.content || r.rawValue || r.text)) || '';
     }
+    // No native plugin: the app's own camera scanner (app/scanner.js), then typing.
+    if (typeof window.SV_SCAN_ONCE === 'function') {
+      const v = await window.SV_SCAN_ONCE('Scan barcode / QR');
+      if (v) return v;
+      return '';
+    }
     const v = typeof prompt === 'function' ? prompt('Serial / barcode') : '';
     return v || '';
   };

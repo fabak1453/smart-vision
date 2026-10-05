@@ -100,14 +100,52 @@
     } catch (e) { /* ignore */ }
   }
 
+  var LAN_PIN_KEY = 'sv_lan_pin';
+  function lanPin() {
+    try { return localStorage.getItem(LAN_PIN_KEY) || ''; } catch (e) { return ''; }
+  }
+  /** Shown when this page is served by the shop PC over Wi-Fi and needs the PIN. */
+  function showPinField(message) {
+    var wrap = document.getElementById('lan-pin-wrap');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = 'lan-pin-wrap';
+      wrap.innerHTML = '<label class="field-l" for="lan-pin">Shop PC PIN (Wi-Fi)</label>'
+        + '<input class="inp" id="lan-pin" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6-digit PIN">'
+        + '<div class="err" id="lan-pin-msg" style="margin-top:6px"></div>';
+      if (err && err.parentNode) err.parentNode.insertBefore(wrap, err);
+      var input = wrap.querySelector('#lan-pin');
+      input.addEventListener('change', function () {
+        var v = (input.value || '').trim();
+        if (!v) return;
+        try { localStorage.setItem(LAN_PIN_KEY, v); } catch (e) { /* ignore */ }
+        teamCache = null;
+        loadTeam();
+      });
+    }
+    var msg = document.getElementById('lan-pin-msg');
+    if (msg) msg.textContent = message || '';
+  }
+
   async function loadTeam() {
     if (teamCache) return teamCache;
     try {
-      var res = await fetch('./api.php?t=' + Date.now());
+      var pin = lanPin();
+      var res = await fetch('./api.php?t=' + Date.now(), {
+        cache: 'no-store',
+        headers: pin ? { 'X-SV-PIN': pin } : undefined,
+      });
       if (res.ok) {
         var data = await res.json();
         teamCache = Array.isArray(data.TEAM) ? data.TEAM : [];
+        var done = document.getElementById('lan-pin-msg');
+        if (done) done.textContent = '';
         return teamCache;
+      }
+      if (res.status === 401 || res.status === 403) {
+        showPinField(res.status === 403
+          ? 'Wi-Fi sharing is off on the shop PC.'
+          : (pin ? 'Wrong PIN — check Settings on the shop PC.' : 'Enter the PIN shown on the shop PC to sign in here.'));
       }
     } catch (e) { /* offline / static */ }
     teamCache = [];

@@ -1,33 +1,31 @@
 # Windows installer (make it again)
 
-Shop PCs should run **Setup 9.5.0** (or newer). Do **not** give customers **Setup 9.4.0** — that build was signed on a Mac and many Windows 10 PCs refuse to start it.
-
-## Command (from this repo)
-
-On the Mac (or any machine with Node.js) that already has this project:
-
 ```bash
-cd "/path/to/smart-vision-desktop"
 npm install
-npm run dist
+npm run dist        # → dist/Smart Vision ERP Setup <version>.exe  (+ Portable)
 ```
 
-`npm run dist` is the same as `npm run dist:win`. It packs **only** `electron/`, `app/`, and `build/icon.png`. The `apk/` Android project is **not** inside the Windows Setup exe.
+Works on **Windows** (simplest) or on a **Mac** (needs Wine: `brew install --cask wine-stable`)
+and **needs internet** during the build.
 
-It:
+## What `npm run dist` does (scripts/dist-win.js, since 9.8.1)
+1. Compiles the app (`prepare-app`).
+2. Gets the **Windows x64** database module (better-sqlite3) for Electron, and **checks the
+   file itself**. On a Mac this module has to be downloaded; if that fails the build **stops**
+   with a plain message. (Before 9.8.1 it silently packed the Mac module: the installer
+   installed fine and then said "Smart Vision ERP could not start" with a wall of errors.)
+3. Builds the unsigned NSIS installer and the portable exe.
+4. Checks the module **inside the finished app** again. Any installer from a failed build is
+   renamed `*.BROKEN-do-not-ship.exe`.
+5. On a Mac / Linux, puts that computer's own module back, so `npm start` keeps working.
 
-1. Compiles `app/smart-vision-app.jsx` → `app/smart-vision-app.js` (`prepare-app`)
-2. Rebuilds `better-sqlite3` for **Windows x64**
-3. Builds an **unsigned** NSIS installer and a portable exe (`CSC_IDENTITY_AUTO_DISCOVERY=false`)
+`node scripts/dist-win.js --dir` builds only `dist/win-unpacked` (no installer, no Wine), for testing.
 
-When it finishes, copy these files from `dist/`:
-
-| File | Use |
-|------|-----|
-| `Smart Vision ERP Setup 9.5.0.exe` | **Final installer** — choose folder, desktop shortcut |
-| `Smart Vision ERP 9.5.0 Portable.exe` | Optional, no install |
-
-Version in the filename comes from `"version"` in [package.json](../package.json). Bump that number **before** `npm run dist` if you want Setup 9.4.3, etc.
+## If an installed app says "could not start"
+9.8.1 shows a short reason and saves the details in
+`%APPDATA%\Smart Vision ERP\logs\startup-error-<time>.txt` (button **Open log folder**).
+"Installer problem" = the old broken build: install the new installer over it. The data in
+`%APPDATA%\Smart Vision ERP\data` is kept; nothing is deleted.
 
 ## After a Mac build: run the app locally again
 

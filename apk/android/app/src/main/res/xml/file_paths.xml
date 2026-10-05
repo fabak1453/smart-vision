@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Referenced by AndroidManifest.xml (androidx.core.content.FileProvider).
+  Without this file the Android build fails at resource linking with
+  "resource xml/file_paths not found", so the APK could never be produced.
+  Contents are the Capacitor defaults.
+-->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-path name="my_images" path="." />
     <cache-path name="my_cache_images" path="." />
+    <files-path name="my_files" path="." />
 </paths>

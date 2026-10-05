@@ -79,6 +79,20 @@ function setRevision(n) {
   setMeta('revision', String(n));
 }
 
+/**
+ * A counter bumped on EVERY write, whoever made it — the PC window, a phone
+ * sync, or a CSV restore. Clients poll it to notice that the database changed
+ * underneath them. Deliberately separate from `revision`, which belongs to the
+ * phone merge protocol and must not move on an ordinary autosave.
+ */
+function getSeq() {
+  const n = parseInt(getMeta('seq') || '0', 10);
+  return Number.isFinite(n) ? n : 0;
+}
+function stateStamp() {
+  return { seq: getSeq(), revision: getRevision(), savedAt: Number(getMeta('savedAt')) || 0 };
+}
+
 /** Load the saved snapshot (string of JSON) or '{}' on first run. */
 function loadState() {
   try {
@@ -117,6 +131,11 @@ function saveState(jsonText) {
   const prevRev = getRevision();
   const incomingRev = Number(parsed.revision);
   parsed.revision = Math.max(prevRev, Number.isFinite(incomingRev) ? incomingRev : 0);
+  // Every snapshot on disk carries a time. A restore that arrived without one
+  // used to look infinitely old, so the app preferred its own stale copy and
+  // quietly undid the restore on the next start.
+  if (!Number(parsed.savedAt)) parsed.savedAt = Date.now();
+  const nextSeq = getSeq() + 1;
   jsonText = JSON.stringify(parsed);
   const tx = db.transaction(() => {
     db.prepare(`
@@ -128,11 +147,13 @@ function saveState(jsonText) {
     for (const [name, rows] of Object.entries(entities)) upsertEntityTable(name, rows);
     if (Array.isArray(parsed.TEAM)) upsertEntityTable('team', parsed.TEAM);
     if (parsed.revision != null) setRevision(parsed.revision);
+    setMeta('seq', String(nextSeq));
+    setMeta('savedAt', String(parsed.savedAt));
   });
   tx();
-  return true;
+  return { ok: true, seq: nextSeq, revision: parsed.revision, savedAt: parsed.savedAt };
 }
 
 function close() { try { db && db.close(); } catch (e) { /* ignore */ } }
 
-module.exports = { init, loadState, saveState, close, getMeta, setMeta, getRevision, setRevision, get file() { return dbFile; } };
+module.exports = { init, loadState, saveState, close, getMeta, setMeta, getRevision, setRevision, getSeq, stateStamp, get file() { return dbFile; } };

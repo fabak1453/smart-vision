@@ -20,12 +20,12 @@ const MARKER = MARKER_V2;
 const TABLE_ORDER = [
   'team', 'customers', 'leads', 'quotes', 'invoices', 'jobs', 'tickets', 'amc',
   'products', 'serials', 'equipment', 'credentials', 'purchaseOrders', 'repairs', 'ledger',
-  'stock_moves', 'catalog', 'company',
+  'stock_moves', 'tombstones', 'catalog', 'company',
 ];
 
 const SCHEMAS = {
   team: {
-    cols: ['id', 'name', 'role', 'phone', 'login_username', 'login_password'],
+    cols: ['id', 'name', 'role', 'phone', 'login_username', 'login_password', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.name || '').toLowerCase(),
   },
   catalog: {
@@ -40,82 +40,82 @@ const SCHEMAS = {
     lists: { ledgerCategories: 'textList' },
   },
   customers: {
-    cols: ['id', 'name', 'area', 'type', 'contact_name', 'phone', 'sites', 'owner', 'lifetime_value', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
+    cols: ['id', 'name', 'area', 'type', 'contact_name', 'phone', 'gstin', 'sites', 'owner', 'lifetime_value', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.name || '').toLowerCase(),
     refs: { owner: 'obj' },
     nums: ['sites', 'lifetime_value'],
   },
   leads: {
-    cols: ['id', 'name', 'requirement', 'value', 'source', 'segment', 'owner', 'stage'],
+    cols: ['id', 'name', 'phone', 'requirement', 'value', 'source', 'segment', 'owner', 'stage', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.id || '') + '|' + String(r.name || '').toLowerCase(),
     refs: { owner: 'obj' },
     nums: ['value', 'stage'],
   },
   quotes: {
-    cols: ['id', 'number', 'customer', 'scope', 'total', 'status', 'owner', 'valid_till', 'invoice_number', 'job_number', 'items'],
+    cols: ['id', 'number', 'customer', 'scope', 'total', 'status', 'owner', 'valid_till', 'invoice_number', 'job_number', 'items', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.number || '').toLowerCase(),
     refs: { customer: 'obj', owner: 'obj' },
     nums: ['total'],
     lists: { items: 'amountItems' },
   },
   invoices: {
-    cols: ['id', 'number', 'customer', 'total', 'paid', 'balance', 'status', 'issue_date', 'due_date', 'note', 'items', 'payments'],
+    cols: ['id', 'number', 'customer', 'total', 'paid', 'balance', 'status', 'issue_date', 'due_date', 'phone', 'note', 'items', 'payments', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.number || '').toLowerCase(),
     refs: { customer: 'obj' },
     nums: ['total', 'paid', 'balance'],
     lists: { items: 'amountItems', payments: 'payments' },
   },
   jobs: {
-    cols: ['id', 'number', 'customer', 'type', 'scope', 'scheduled_on', 'slot', 'technician', 'status', 'checklist'],
+    cols: ['id', 'number', 'customer', 'type', 'scope', 'scheduled_on', 'slot', 'technician', 'status', 'checklist', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.number || '').toLowerCase(),
     refs: { customer: 'obj', technician: 'obj' },
     lists: { checklist: 'checklist' },
   },
   tickets: {
-    cols: ['id', 'number', 'customer', 'issue', 'priority', 'coverage', 'assignee', 'status', 'sla_state', 'activities'],
+    cols: ['id', 'number', 'customer', 'issue', 'priority', 'coverage', 'assignee', 'status', 'sla_state', 'activities', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.number || '').toLowerCase(),
     refs: { customer: 'obj', assignee: 'obj' },
     lists: { activities: 'activities' },
   },
   amc: {
-    cols: ['id', 'number', 'customer', 'plan', 'devices', 'value', 'starts_on', 'ends_on', 'visits_total', 'visits_used', 'status', 'invoice_number'],
+    cols: ['id', 'number', 'customer', 'plan', 'devices', 'value', 'starts_on', 'ends_on', 'visits_total', 'visits_used', 'status', 'invoice_number', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.number || '').toLowerCase(),
     refs: { customer: 'obj' },
     nums: ['devices', 'value', 'visits_total', 'visits_used'],
   },
   products: {
-    cols: ['id', 'sku', 'name', 'specs', 'category', 'purchase_price', 'sale_price', 'stock', 'reserved', 'reorder_level', 'track_serials', 'stock_baseline', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
+    cols: ['id', 'sku', 'barcode', 'name', 'specs', 'category', 'unit', 'hsn', 'gst_rate', 'mrp', 'purchase_price', 'sale_price', 'stock', 'reserved', 'reorder_level', 'track_serials', 'stock_baseline', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.sku || '').toLowerCase(),
-    nums: ['purchase_price', 'sale_price', 'stock', 'reserved', 'reorder_level'],
+    nums: ['gst_rate', 'mrp', 'purchase_price', 'sale_price', 'stock', 'reserved', 'reorder_level'],
     bools: ['track_serials'],
   },
   serials: {
-    cols: ['id', 'serial_no', 'product', 'customer', 'status', 'in_warranty', 'sold_on', 'warranty_end'],
+    cols: ['id', 'serial_no', 'product', 'customer', 'status', 'in_warranty', 'sold_on', 'warranty_end', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.serial_no || '').toLowerCase(),
     refs: { product: 'obj', customer: 'obj' },
     bools: ['in_warranty'],
   },
   equipment: {
-    cols: ['id', 'name', 'customer', 'product', 'serial_no', 'location', 'installed_on', 'warranty_end', 'in_warranty'],
+    cols: ['id', 'name', 'customer', 'product', 'serial_no', 'location', 'installed_on', 'warranty_end', 'in_warranty', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.serial_no || r.id || '') + '|' + String(r.customer || '').toLowerCase(),
     refs: { customer: 'obj', product: 'obj' },
     bools: ['in_warranty'],
   },
   credentials: {
-    cols: ['id', 'label', 'customer', 'host', 'port', 'username', 'password', 'notes'],
+    cols: ['id', 'label', 'customer', 'host', 'port', 'username', 'password', 'notes', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.customer || '').toLowerCase() + '|' + String(r.label || '').toLowerCase(),
     refs: { customer: 'obj' },
     nums: ['port'],
   },
   purchaseOrders: {
-    cols: ['id', 'number', 'supplier', 'ordered_on', 'eta', 'total', 'status', 'items'],
+    cols: ['id', 'number', 'supplier', 'ordered_on', 'eta', 'total', 'status', 'items', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.number || '').toLowerCase(),
     refs: { supplier: 'obj' },
     nums: ['total'],
     lists: { items: 'poItems' },
   },
   repairs: {
-    cols: ['id', 'number', 'customer', 'device', 'serial_no', 'issue', 'coverage', 'received_on', 'promised_on', 'technician', 'charge', 'status', 'invoice_number'],
+    cols: ['id', 'number', 'customer', 'device', 'serial_no', 'issue', 'coverage', 'received_on', 'promised_on', 'technician', 'charge', 'status', 'invoice_number', 'uuid', 'updated_at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.number || '').toLowerCase(),
     refs: { customer: 'obj', technician: 'obj' },
     nums: ['charge'],
@@ -129,6 +129,12 @@ const SCHEMAS = {
     cols: ['id', 'uuid', 'product_uuid', 'qty', 'reason', 'ref', 'at', 'origin_device', 'deleted_at'],
     key: (r) => String(r.uuid || r.id || ''),
     nums: ['qty'],
+  },
+  // Deleted records (see erp-model.js): kept so a restore doesn't let a phone that
+  // still has a deleted record bring it back on its next sync.
+  tombstones: {
+    cols: ['table', 'uuid', 'deleted_at', 'updated_at', 'origin_device'],
+    key: (r) => String(r.table || '') + ':' + String(r.uuid || ''),
   },
 };
 
@@ -180,12 +186,19 @@ function decodeTextList(s) {
   return String(s).split('|').map((x) => x.trim()).filter(Boolean);
 }
 
+// One bill / quote line per ';', fields split by '|':
+//   description | amount | qty | product_id | gst_rate | hsn | unit | uuid
+// The last four were added for item-wise GST and sync; older backups simply lack
+// them. The line uuid matters: without it a restore re-identified every line and
+// the next phone sync merged them in again as duplicates.
+const cleanCell = (v) => String(v == null ? '' : v).replace(/[|;]/g, '/');
 function encodeAmountItems(items) {
   if (!Array.isArray(items) || !items.length) return '';
   return items.map((it) => {
     const qty = it.qty != null && it.qty !== '' ? it.qty : 1;
     const pid = it.product_id != null && it.product_id !== '' ? it.product_id : '';
-    return `${String(it.description || '').replace(/\|/g, '/')}|${it.amount ?? 0}|${qty}|${pid}`;
+    const rate = it.gst_rate != null && it.gst_rate !== '' ? it.gst_rate : '';
+    return [cleanCell(it.description), it.amount ?? 0, qty, pid, rate, cleanCell(it.hsn), cleanCell(it.unit), cleanCell(it.uuid)].join('|');
   }).join(';');
 }
 
@@ -199,14 +212,20 @@ function decodeAmountItems(s) {
     if (bits.length === 2) {
       return { id: i + 1, description: bits[0].trim(), amount: Number(bits[1]) || 0, qty: 1 };
     }
-    const pidRaw = bits[3] != null ? String(bits[3]).trim() : '';
-    return {
+    const at = (k) => (bits[k] != null ? String(bits[k]).trim() : '');
+    const pidRaw = at(3);
+    const line = {
       id: i + 1,
       description: bits[0].trim(),
       amount: Number(bits[1]) || 0,
       qty: Number(bits[2]) || 1,
       product_id: pidRaw ? (Number(pidRaw) || pidRaw) : null,
     };
+    if (at(4) !== '' && Number.isFinite(Number(at(4)))) line.gst_rate = Number(at(4));
+    if (at(5)) line.hsn = at(5);
+    if (at(6)) line.unit = at(6);
+    if (at(7)) line.uuid = at(7);
+    return line;
   }).filter(Boolean);
 }
 
@@ -384,8 +403,11 @@ function dedupeAndAssignIds(table, rows) {
   const byKey = new Map();
   rows.forEach((r) => {
     if (!r) return;
-    const k = schema && schema.key ? schema.key(r) : String(r.id || Math.random());
-    if (!k || k === '|' || k === 'null') return;
+    let k = schema && schema.key ? schema.key(r) : String(r.id || Math.random());
+    // A row without its business key (e.g. a product saved without a SKU) is kept
+    // by its uuid. It used to be dropped on restore: silent data loss.
+    if (!k || k === '|' || k === 'null') k = r.uuid ? 'uuid:' + r.uuid : '';
+    if (!k) return;
     byKey.set(k, r);
   });
   const out = Array.from(byKey.values());
@@ -406,6 +428,8 @@ function dedupeAndAssignIds(table, rows) {
 function stateToCsv(state) {
   const lines = [
     MARKER_V2,
+    '# savedAt=' + (Number(state && state.savedAt) || 0),
+    '# revision=' + (Number(state && state.revision) || 0),
     '# Excel-friendly backup — one section per table. Save as CSV UTF-8.',
     '# Leave id blank for new rows. Use plain names for customer / owner / technician.',
     '# Quote/invoice line items: Description|Amount;Description|Amount',
@@ -484,6 +508,7 @@ function parseV2(rawLines) {
   const TEAM = [];
   const counts = {};
   const sections = new Set();
+  const meta = {};
   let section = null;
   let cols = null;
   let jsonMode = false;
@@ -495,6 +520,11 @@ function parseV2(rawLines) {
     if (!line || !line.trim()) continue;
     const trimmed = line.trim();
     if (trimmed.startsWith('#')) {
+      // stateToCsv writes "# savedAt=..." and "# revision=..." in the header.
+      // They used to be skipped with the other comments, so a restored snapshot
+      // looked infinitely old and lost to whatever stale copy a device held.
+      const mm = trimmed.match(/^#(?!#)\s*(savedAt|revision)\s*=\s*(\d+)/i);
+      if (mm) { meta[mm[1].toLowerCase()] = Number(mm[2]) || 0; continue; }
       const m = trimmed.match(/^##\s+([A-Za-z0-9_]+)/);
       if (m) {
         section = m[1];
@@ -600,7 +630,11 @@ function parseV2(rawLines) {
     delete DB.company;
   }
 
-  return { state: { DB, TEAM, CATALOG, COMPANY }, counts, sections: Array.from(sections) };
+  return {
+    state: { DB, TEAM, CATALOG, COMPANY, savedAt: meta.savedat || 0, revision: meta.revision || 0 },
+    counts,
+    sections: Array.from(sections),
+  };
 }
 
 function csvToState(text) {

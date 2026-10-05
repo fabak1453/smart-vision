@@ -1,0 +1,328 @@
+// Smart Vision ERP — Zed Agent settings (USER settings, not project settings)
+//
+// Paste the "agent" block below into your user settings file:
+//   command palette → "zed: open settings file"
+// (Zed does not apply agent profiles from a project's .zed/settings.json — zed issue #39011.)
+// If you already have an "agent" block, merge these keys into it.
+//
+// What it sets up:
+//   • profile "loop"   — every tool on: read, edit, terminal, diagnostics, skills, subagents
+//   • profile "review" — read + run checks, no editing (a second opinion in another thread)
+//   • tool_permissions — edits and the verify/test commands run without prompts so the loop
+//     can keep going; generated files, secrets, keygen/ and build/certs/ are blocked;
+//     git commits/pushes, deletes, installs of new packages and builds always ask.
+// Needs Zed v0.224.0 or newer (tool_permissions). Older Zed used "always_allow_tool_actions".
+{
+  "agent": {
+    "default_profile": "loop",
+    "profiles": {
+      "loop": {
+        "name": "Loop: read, write, verify, debug",
+        "tools": {
+          "list_directory": true,
+          "find_path": true,
+          "grep": true,
+          "read_file": true,
+          "diagnostics": true,
+          "edit_file": true,
+          "write_file": true,
+          "create_directory": true,
+          "copy_path": true,
+          "move_path": true,
+          "delete_path": true,
+          "terminal": true,
+          "fetch": true,
+          "search_web": true,
+          "skill": true,
+          "spawn_agent": true
+        },
+        "enable_all_context_servers": false,
+        "context_servers": {}
+      },
+      "review": {
+        "name": "Review: read and run checks, no edits",
+        "tools": {
+          "list_directory": true,
+          "find_path": true,
+          "grep": true,
+          "read_file": true,
+          "diagnostics": true,
+          "edit_file": false,
+          "write_file": false,
+          "create_directory": false,
+          "copy_path": false,
+          "move_path": false,
+          "delete_path": false,
+          "terminal": true,
+          "fetch": false,
+          "search_web": false,
+          "skill": true,
+          "spawn_agent": false
+        },
+        "enable_all_context_servers": false,
+        "context_servers": {}
+      }
+    },
+    "tool_permissions": {
+      "default": "confirm",
+      "tools": {
+        "edit_file": {
+          "default": "allow",
+          "always_deny": [
+            {
+              "pattern": "smart-vision-app\\.js$"
+            },
+            {
+              "pattern": "(^|[\\\\/])app[\\\\/]vendor[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])apk[\\\\/]www[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])node_modules[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.git[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])keygen([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])build[\\\\/]certs([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.env(\\.|$)"
+            },
+            {
+              "pattern": "\\.(pem|key|p12|pfx|jks|keystore)$"
+            }
+          ],
+          "always_confirm": [
+            {
+              "pattern": "(^|[\\\\/])package(-lock)?\\.json$"
+            },
+            {
+              "pattern": "capacitor\\.config\\.json$"
+            },
+            {
+              "pattern": "AndroidManifest\\.xml$"
+            },
+            {
+              "pattern": "(^|[\\\\/])scripts[\\\\/]verify\\.js$"
+            },
+            {
+              "pattern": "(^|[\\\\/])AGENTS\\.md$"
+            }
+          ]
+        },
+        "write_file": {
+          "default": "allow",
+          "always_deny": [
+            {
+              "pattern": "smart-vision-app\\.js$"
+            },
+            {
+              "pattern": "(^|[\\\\/])app[\\\\/]vendor[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])apk[\\\\/]www[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])node_modules[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.git[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])keygen([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])build[\\\\/]certs([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.env(\\.|$)"
+            },
+            {
+              "pattern": "\\.(pem|key|p12|pfx|jks|keystore)$"
+            }
+          ],
+          "always_confirm": [
+            {
+              "pattern": "(^|[\\\\/])package(-lock)?\\.json$"
+            },
+            {
+              "pattern": "capacitor\\.config\\.json$"
+            },
+            {
+              "pattern": "AndroidManifest\\.xml$"
+            },
+            {
+              "pattern": "(^|[\\\\/])scripts[\\\\/]verify\\.js$"
+            },
+            {
+              "pattern": "(^|[\\\\/])AGENTS\\.md$"
+            }
+          ]
+        },
+        "create_directory": {
+          "default": "allow",
+          "always_deny": [
+            {
+              "pattern": "smart-vision-app\\.js$"
+            },
+            {
+              "pattern": "(^|[\\\\/])app[\\\\/]vendor[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])apk[\\\\/]www[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])node_modules[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.git[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])keygen([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])build[\\\\/]certs([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.env(\\.|$)"
+            },
+            {
+              "pattern": "\\.(pem|key|p12|pfx|jks|keystore)$"
+            }
+          ]
+        },
+        "copy_path": {
+          "default": "allow",
+          "always_deny": [
+            {
+              "pattern": "smart-vision-app\\.js$"
+            },
+            {
+              "pattern": "(^|[\\\\/])app[\\\\/]vendor[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])apk[\\\\/]www[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])node_modules[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.git[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])keygen([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])build[\\\\/]certs([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.env(\\.|$)"
+            },
+            {
+              "pattern": "\\.(pem|key|p12|pfx|jks|keystore)$"
+            }
+          ]
+        },
+        "move_path": {
+          "default": "confirm"
+        },
+        "delete_path": {
+          "default": "confirm",
+          "always_deny": [
+            {
+              "pattern": "(^|[\\\\/])node_modules[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.git[\\\\/]"
+            },
+            {
+              "pattern": "(^|[\\\\/])keygen([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])build[\\\\/]certs([\\\\/]|$)"
+            },
+            {
+              "pattern": "(^|[\\\\/])\\.env(\\.|$)"
+            },
+            {
+              "pattern": "\\.(pem|key|p12|pfx|jks|keystore)$"
+            }
+          ]
+        },
+        "terminal": {
+          "default": "confirm",
+          "always_allow": [
+            {
+              "pattern": "^node\\s+scripts[\\\\/]verify\\.js\\b"
+            },
+            {
+              "pattern": "^node\\s+test-[\\w-]+\\.js\\b"
+            },
+            {
+              "pattern": "^npm\\s+(test|run\\s+(verify|prepare-app))\\b"
+            },
+            {
+              "pattern": "^npm\\s+(install|ci)(\\s+--ignore-scripts)?$"
+            },
+            {
+              "pattern": "^git\\s+(status|diff|log|show|blame|branch|rev-parse|ls-files)\\b"
+            },
+            {
+              "pattern": "^(cd|ls|dir|pwd|head|tail|wc|grep|rg|findstr)\\b"
+            }
+          ],
+          "always_confirm": [
+            {
+              "pattern": "^git\\s+(commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|stash|tag|cherry-pick|revert)\\b"
+            },
+            {
+              "pattern": "^npm\\s+(run\\s+(dist|dist:win|apk:sync)|publish|uninstall|update|install\\s+\\S)"
+            },
+            {
+              "pattern": "gradlew"
+            },
+            {
+              "pattern": "\\b(rm|rmdir|del|erase|rd|mv|move|Remove-Item|Move-Item)\\b"
+            },
+            {
+              "pattern": "\\bsudo\\b"
+            },
+            {
+              "pattern": "\\b(curl|wget|Invoke-WebRequest|iwr)\\b"
+            },
+            {
+              "pattern": "(^|[^0-9&])>{1,2}\\s*[^&\\s]"
+            }
+          ],
+          "always_deny": [
+            {
+              "pattern": "(^|[\\s\\\\/\"\\'])keygen([\\\\/]|\\s|\"|\\'|$)"
+            },
+            {
+              "pattern": "build[\\\\/]certs"
+            }
+          ]
+        },
+        "skill": {
+          "default": "confirm",
+          "always_allow": [
+            {
+              "pattern": "[\\\\/]\\.agents[\\\\/]skills[\\\\/](loop|read-code|write-code|verify|debug)[\\\\/]SKILL\\.md$"
+            }
+          ]
+        },
+        "fetch": {
+          "default": "allow"
+        },
+        "search_web": {
+          "default": "allow"
+        }
+      }
+    }
+  }
+}

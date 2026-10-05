@@ -15,6 +15,11 @@ const vendorFiles = [
   ['node_modules/react/umd/react.production.min.js', 'react.production.min.js'],
   ['node_modules/react-dom/umd/react-dom.production.min.js', 'react-dom.production.min.js'],
   ['node_modules/@babel/standalone/babel.min.js', 'babel.min.js'],
+  // Camera barcode / QR decoding, loaded on demand by app/scanner.js.
+  ['node_modules/@zxing/library/umd/index.min.js', 'zxing.min.js'],
+  // Bill PDFs made on the phone (app/bill-share.js), loaded on demand.
+  ['node_modules/jspdf/dist/jspdf.umd.min.js', 'jspdf.umd.min.js'],
+  ['node_modules/html2canvas/dist/html2canvas.min.js', 'html2canvas.min.js'],
 ];
 
 function copyVendor() {
